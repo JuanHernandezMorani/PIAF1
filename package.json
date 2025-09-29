@@ -1,0 +1,17 @@
+{
+  "name": "image-zone-editor",
+  "version": "1.0.0",
+  "description": "GUI para marcar zonas en imágenes",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^22.0.0"
+  },
+  "dependencies": {
+    "fs": "0.0.1-security",
+    "path": "^0.12.7"
+  }
+}

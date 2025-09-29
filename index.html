@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anotador de Imágenes</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Anotador de Imágenes</h1>
+            <div class="controls">
+                <button id="saveBtn">Guardar</button>
+                <button id="prevBtn">Anterior</button>
+                <button id="nextBtn">Siguiente</button>
+            </div>
+        </header>
+        <div class="main-content">
+            <div class="sidebar">
+                <div class="zone-selector">
+                    <h3>Zonas</h3>
+                    <select id="zoneSelect">
+                        <option value="img_zone">1. Imagen Completa</option>
+                        <option value="head">2. Cabeza</option>
+                        <option value="eyes">3. Ojos</option>
+                        <option value="mouth">4. Boca</option>
+                        <option value="chest">5. Pecho</option>
+                        <option value="heart">6. Corazón</option>
+                        <option value="back">7. Espalda</option>
+                        <option value="wings">8. Alas</option>
+                        <option value="extremities">9. Extremidades</option>
+                        <option value="claws">10. Garras</option>
+                        <option value="fangs">11. Colmillos</option>
+                        <option value="armor">12. Armadura</option>
+                        <option value="cracks">13. Grietas</option>
+                        <option value="cristal">14. Cristal</option>
+                        <option value="flower">15. Flores</option>
+                        <option value="zombie_zone">16. Zona Zombie</option>
+                        <option value="sky">17. Cielo</option>
+                        <option value="stars">18. Estrellas</option>
+                        <option value="extra">19. Extra</option>
+                    </select>
+                </div>
+                <div class="image-list">
+                    <h3>Imágenes</h3>
+                    <ul id="imageList"></ul>
+                </div>
+                <div class="layer-selector">
+                    <h3>Maps</h3>
+                    <select id="layerSelect">
+                        <option value="base">Base Map</option>
+                        <option value="emissive">Emissive Map</option>
+                        <option value="normal_map">Normal Map</option>
+                        <option value="specular">Specular Map</option>
+                    </select>
+                </div>
+            </div>
+            <div class="image-area">
+                <div class="image-container">
+                    <canvas id="imageCanvas"></canvas>
+                    <div id="noImages" class="no-images">
+                        No hay imágenes en la carpeta 'toDraw'
+                    </div>
+                </div>
+                <div class="image-info">
+                    <span id="imageName">-</span>
+                    <span id="imageIndex">0/0</span>
+                </div>
+            </div>
+            <div class="zones-panel">
+                <h3>Zonas Anotadas</h3>
+                <div id="zonesList"></div>
+            </div>
+        </div>
+    </div>
+    <script src="renderer.js"></script>
+</body>
+</html>
