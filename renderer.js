@@ -3,6 +3,74 @@ const MOVE_HANDLE_CANVAS_PX = 12;
 const MIN_POLYGON_AREA = 5;
 const SAVE_DEBOUNCE_MS = 500;
 
+const ORIENTATIONS = [
+  { id: 0, key: 'top', label: 'Top' },
+  { id: 1, key: 'front', label: 'Front' },
+  { id: 2, key: 'back', label: 'Back' },
+  { id: 3, key: 'left', label: 'Left' },
+  { id: 4, key: 'right', label: 'Right' },
+  { id: 5, key: 'bottom', label: 'Bottom' }
+];
+const ORIENTATION_COUNT = ORIENTATIONS.length;
+const ORIENT_DEFAULT_ID = 0;
+
+function createDefaultConfig() {
+  const orientationFilter = {};
+  ORIENTATIONS.forEach(orientation => {
+    orientationFilter[String(orientation.id)] = true;
+  });
+  return {
+    export: {
+      expandOrientations: false,
+      missingOrientationPolicy: 'default',
+      filter: {
+        classes: {},
+        orientations: orientationFilter
+      }
+    }
+  };
+}
+
+function deepMerge(base, override) {
+  const result = Array.isArray(base) ? base.slice() : { ...base };
+  if (!override || typeof override !== 'object') {
+    return result;
+  }
+  Object.keys(override).forEach(key => {
+    const value = override[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      result[key] = deepMerge(base && base[key] ? base[key] : {}, value);
+    } else {
+      result[key] = value;
+    }
+  });
+  return result;
+}
+
+function mergeConfigWithDefaults(partial) {
+  const defaults = createDefaultConfig();
+  if (!partial || typeof partial !== 'object') {
+    return defaults;
+  }
+  const merged = deepMerge(defaults, partial);
+  if (!merged.export || typeof merged.export !== 'object') {
+    merged.export = defaults.export;
+  }
+  if (!merged.export.filter || typeof merged.export.filter !== 'object') {
+    merged.export.filter = defaults.export.filter;
+  }
+  const orientationFilter = { ...defaults.export.filter.orientations, ...(merged.export.filter.orientations || {}) };
+  merged.export.filter.orientations = orientationFilter;
+  if (!merged.export.filter.classes || typeof merged.export.filter.classes !== 'object') {
+    merged.export.filter.classes = {};
+  }
+  return merged;
+}
+
+function cloneData(data) {
+  return JSON.parse(JSON.stringify(data));
+}
+
 const state = {
   images: [],
   annotations: {},
@@ -36,7 +104,13 @@ const state = {
   lastSaveTs: 0,
   migrationCount: 0,
   loadErrors: [],
-  migrationNotified: false
+  migrationNotified: false,
+  config: createDefaultConfig(),
+  configDirty: false,
+  configLoadError: false,
+  orientationOptions: ORIENTATIONS,
+  currentOrientationId: ORIENT_DEFAULT_ID,
+  orientationIssues: { missing: 0 }
 };
 
 const canvas = document.getElementById('imageCanvas');
@@ -51,18 +125,34 @@ const nextBtn = document.getElementById('nextBtn');
 const imageNameLabel = document.getElementById('imageName');
 const imageIndexLabel = document.getElementById('imageIndex');
 const noImages = document.getElementById('noImages');
+const zonesPanel = document.querySelector('.zones-panel');
 
 let toastContainer;
 let bannerContainer;
+let configPanel;
+let classFiltersContainer;
+let orientationFiltersContainer;
+let expandOrientationsToggle;
+let missingOrientationSelect;
+let saveConfigButton;
+let creationOrientationSelect;
+let selectedObjectPanel;
+let objectOrientationSelect;
+let orientationIssuesBanner;
+let selectedObjectWarnings;
 
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
   setupAuxiliaryContainers();
+  setupConfigPanel();
   setupEventListeners();
+  await ensureAletasClass();
   await loadClasses();
+  await loadConfig();
   await loadImages();
   await loadExistingData();
+  renderConfigPanel();
   updateImageList();
   if (state.images.length > 0) {
     setCurrentImage(0);
@@ -97,6 +187,154 @@ function setupAuxiliaryContainers() {
   bannerContainer.style.flexDirection = 'column';
   bannerContainer.style.gap = '8px';
   document.body.appendChild(bannerContainer);
+}
+
+function setupConfigPanel() {
+  if (!zonesPanel) return;
+  configPanel = document.createElement('div');
+  configPanel.id = 'configPanel';
+  configPanel.style.display = 'flex';
+  configPanel.style.flexDirection = 'column';
+  configPanel.style.gap = '12px';
+  configPanel.style.marginBottom = '12px';
+  zonesPanel.insertBefore(configPanel, zonesList);
+
+  orientationIssuesBanner = document.createElement('div');
+  orientationIssuesBanner.style.display = 'none';
+  orientationIssuesBanner.style.padding = '8px 12px';
+  orientationIssuesBanner.style.borderRadius = '4px';
+  orientationIssuesBanner.style.backgroundColor = '#fff3cd';
+  orientationIssuesBanner.style.color = '#856404';
+  orientationIssuesBanner.style.fontSize = '13px';
+  orientationIssuesBanner.style.border = '1px solid #ffeeba';
+  configPanel.appendChild(orientationIssuesBanner);
+
+  const creationSection = document.createElement('div');
+  creationSection.style.display = 'flex';
+  creationSection.style.flexDirection = 'column';
+  creationSection.style.gap = '4px';
+  const creationLabel = document.createElement('label');
+  creationLabel.textContent = 'Orientación al crear nuevo objeto';
+  creationLabel.style.fontWeight = '600';
+  creationOrientationSelect = document.createElement('select');
+  creationOrientationSelect.addEventListener('change', () => {
+    state.currentOrientationId = Number(creationOrientationSelect.value);
+  });
+  creationSection.appendChild(creationLabel);
+  creationSection.appendChild(creationOrientationSelect);
+  configPanel.appendChild(creationSection);
+
+  const exportSection = document.createElement('div');
+  exportSection.style.display = 'flex';
+  exportSection.style.flexDirection = 'column';
+  exportSection.style.gap = '6px';
+
+  const expandRow = document.createElement('label');
+  expandRow.style.display = 'flex';
+  expandRow.style.alignItems = 'center';
+  expandRow.style.gap = '8px';
+  expandRow.textContent = 'Expandir orientaciones en exportación';
+  expandOrientationsToggle = document.createElement('input');
+  expandOrientationsToggle.type = 'checkbox';
+  expandOrientationsToggle.addEventListener('change', () => {
+    state.config.export.expandOrientations = expandOrientationsToggle.checked;
+    markConfigDirty();
+    updateOrientationIssues();
+    updateZonesList();
+  });
+  expandRow.prepend(expandOrientationsToggle);
+  exportSection.appendChild(expandRow);
+
+  const missingRow = document.createElement('div');
+  missingRow.style.display = 'flex';
+  missingRow.style.flexDirection = 'column';
+  missingRow.style.gap = '4px';
+  const missingLabel = document.createElement('label');
+  missingLabel.textContent = 'Si falta orientación:';
+  missingOrientationSelect = document.createElement('select');
+  const defaultOption = document.createElement('option');
+  defaultOption.value = 'default';
+  defaultOption.textContent = 'Usar orientación por defecto (Top)';
+  const skipOption = document.createElement('option');
+  skipOption.value = 'skip';
+  skipOption.textContent = 'Omitir objeto en exportación';
+  missingOrientationSelect.append(defaultOption, skipOption);
+  missingOrientationSelect.addEventListener('change', () => {
+    state.config.export.missingOrientationPolicy = missingOrientationSelect.value;
+    markConfigDirty();
+    updateOrientationIssues();
+  });
+  missingRow.appendChild(missingLabel);
+  missingRow.appendChild(missingOrientationSelect);
+  exportSection.appendChild(missingRow);
+
+  saveConfigButton = document.createElement('button');
+  saveConfigButton.type = 'button';
+  saveConfigButton.textContent = 'Guardar configuración';
+  saveConfigButton.addEventListener('click', persistConfig);
+  exportSection.appendChild(saveConfigButton);
+
+  configPanel.appendChild(exportSection);
+
+  const classSection = document.createElement('div');
+  const classTitle = document.createElement('strong');
+  classTitle.textContent = 'Clases activas';
+  classSection.appendChild(classTitle);
+  classFiltersContainer = document.createElement('div');
+  classFiltersContainer.style.display = 'flex';
+  classFiltersContainer.style.flexDirection = 'column';
+  classFiltersContainer.style.gap = '4px';
+  classSection.appendChild(classFiltersContainer);
+  configPanel.appendChild(classSection);
+
+  const orientSection = document.createElement('div');
+  const orientTitle = document.createElement('strong');
+  orientTitle.textContent = 'Orientaciones activas';
+  orientSection.appendChild(orientTitle);
+  orientationFiltersContainer = document.createElement('div');
+  orientationFiltersContainer.style.display = 'flex';
+  orientationFiltersContainer.style.flexWrap = 'wrap';
+  orientationFiltersContainer.style.gap = '6px';
+  orientSection.appendChild(orientationFiltersContainer);
+  configPanel.appendChild(orientSection);
+
+  selectedObjectPanel = document.createElement('div');
+  selectedObjectPanel.style.display = 'none';
+  selectedObjectPanel.style.flexDirection = 'column';
+  selectedObjectPanel.style.gap = '6px';
+  selectedObjectPanel.style.padding = '8px';
+  selectedObjectPanel.style.border = '1px solid #ccc';
+  selectedObjectPanel.style.borderRadius = '4px';
+  selectedObjectPanel.style.backgroundColor = '#f9f9f9';
+  const selectedTitle = document.createElement('strong');
+  selectedTitle.textContent = 'Objeto seleccionado';
+  const orientationLabel = document.createElement('label');
+  orientationLabel.textContent = 'Orientación';
+  objectOrientationSelect = document.createElement('select');
+  objectOrientationSelect.addEventListener('change', () => {
+    const annotation = getCurrentAnnotation();
+    if (!annotation || !state.selectedObjectId) return;
+    const object = getObjectById(state.selectedObjectId);
+    if (!object) return;
+    const newId = Number(objectOrientationSelect.value);
+    object.class_orientation_id = newId;
+    if (object.meta) {
+      delete object.meta.orientationDefaulted;
+    }
+    updateDerivedData(annotation, object);
+    markImageDirty(annotation.file_name);
+    updateOrientationIssues();
+    updateZonesList();
+    redrawCanvas();
+  });
+  selectedObjectPanel.appendChild(selectedTitle);
+  selectedObjectPanel.appendChild(orientationLabel);
+  selectedObjectPanel.appendChild(objectOrientationSelect);
+  selectedObjectWarnings = document.createElement('div');
+  selectedObjectWarnings.style.fontSize = '12px';
+  selectedObjectWarnings.style.color = '#8a6d3b';
+  selectedObjectPanel.appendChild(selectedObjectWarnings);
+  configPanel.appendChild(selectedObjectPanel);
 }
 
 function setupEventListeners() {
@@ -149,8 +387,10 @@ async function loadClasses() {
       showBanner(`Se generó classes.txt con ${state.classes.length} clases inferidas.`);
     }
   }
+  syncConfigWithClasses();
   buildClassSelector();
   syncAnnotationsWithClassMap();
+  renderConfigPanel();
 }
 
 function buildClassSelector() {
@@ -171,6 +411,20 @@ function buildClassSelector() {
   } else {
     state.currentClassName = null;
   }
+}
+
+function getOrientationById(id) {
+  return ORIENTATIONS.find(option => option.id === id) || null;
+}
+
+function getOrientationLabel(id) {
+  const orientation = getOrientationById(id);
+  return orientation ? orientation.label : 'Desconocida';
+}
+
+function getOrientationKey(id) {
+  const orientation = getOrientationById(id);
+  return orientation ? orientation.key : 'unknown';
 }
 
 function generateColorForClass(className) {
@@ -194,6 +448,19 @@ async function loadImages() {
     return;
   }
   state.images = imagesResult.images || [];
+}
+
+async function ensureAletasClass() {
+  try {
+    const result = await window.electronAPI.ensureAletas();
+    if (!result.success) {
+      showToast(`No se pudo verificar la clase "aletas": ${result.error}`, 'warning');
+    } else if (result.added) {
+      showToast('Se agregó la clase "aletas" a classes.txt.', 'info');
+    }
+  } catch (error) {
+    showToast(`No se pudo asegurar la clase "aletas": ${error.message}`, 'warning');
+  }
 }
 
 async function loadExistingData() {
@@ -223,6 +490,262 @@ async function loadExistingData() {
   }
 }
 
+async function loadConfig() {
+  try {
+    const result = await window.electronAPI.loadConfig();
+    if (!result.success) {
+      state.config = createDefaultConfig();
+      state.configLoadError = true;
+      showToast(`Config por defecto: ${result.error}`, 'warning');
+    } else {
+      state.config = mergeConfigWithDefaults(result.config);
+      state.configLoadError = false;
+    }
+  } catch (error) {
+    state.config = createDefaultConfig();
+    state.configLoadError = true;
+    showToast(`Config por defecto: ${error.message}`, 'warning');
+  }
+  syncConfigWithClasses();
+  state.configDirty = false;
+  renderConfigPanel();
+}
+
+function markConfigDirty() {
+  state.configDirty = true;
+  if (saveConfigButton) {
+    saveConfigButton.disabled = false;
+  }
+}
+
+async function persistConfig() {
+  try {
+    const result = await window.electronAPI.saveConfig(state.config);
+    if (!result.success) {
+      throw new Error(result.error || 'Error desconocido al guardar config.json');
+    }
+    state.config = mergeConfigWithDefaults(result.config);
+    state.configDirty = false;
+    showToast('Configuración guardada.', 'success');
+  } catch (error) {
+    showToast(`No se pudo guardar la configuración: ${error.message}`, 'error');
+  }
+  renderConfigPanel();
+}
+
+function populateOrientationSelect(select) {
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = '';
+  state.orientationOptions.forEach(option => {
+    const opt = document.createElement('option');
+    opt.value = String(option.id);
+    opt.textContent = `${option.label} (${option.key})`;
+    select.appendChild(opt);
+  });
+  if (previous) {
+    select.value = previous;
+  }
+}
+
+function renderConfigPanel() {
+  if (!configPanel) return;
+  populateOrientationSelect(creationOrientationSelect);
+  populateOrientationSelect(objectOrientationSelect);
+  if (creationOrientationSelect) {
+    creationOrientationSelect.value = String(state.currentOrientationId);
+  }
+  if (expandOrientationsToggle) {
+    expandOrientationsToggle.checked = Boolean(state.config.export.expandOrientations);
+  }
+  if (missingOrientationSelect) {
+    missingOrientationSelect.value = state.config.export.missingOrientationPolicy || 'default';
+  }
+  if (saveConfigButton) {
+    saveConfigButton.disabled = !state.configDirty;
+  }
+  renderClassFilters();
+  renderOrientationFilters();
+  renderSelectedObjectPanel();
+  updateOrientationIssues();
+}
+
+function renderClassFilters() {
+  if (!classFiltersContainer) return;
+  classFiltersContainer.innerHTML = '';
+  if (!state.classes || state.classes.length === 0) {
+    const empty = document.createElement('span');
+    empty.textContent = 'Sin clases disponibles.';
+    classFiltersContainer.appendChild(empty);
+    return;
+  }
+  state.classes.forEach(className => {
+    const wrapper = document.createElement('label');
+    wrapper.style.display = 'flex';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.gap = '6px';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    const enabled = state.config.export.filter.classes[className];
+    checkbox.checked = enabled !== false;
+    checkbox.addEventListener('change', () => {
+      state.config.export.filter.classes[className] = checkbox.checked;
+      markConfigDirty();
+      updateZonesList();
+    });
+    const label = document.createElement('span');
+    label.textContent = className;
+    wrapper.appendChild(checkbox);
+    wrapper.appendChild(label);
+    classFiltersContainer.appendChild(wrapper);
+  });
+}
+
+function renderOrientationFilters() {
+  if (!orientationFiltersContainer) return;
+  orientationFiltersContainer.innerHTML = '';
+  ORIENTATIONS.forEach(option => {
+    const wrapper = document.createElement('label');
+    wrapper.style.display = 'flex';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.gap = '4px';
+    wrapper.style.minWidth = '120px';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    const enabled = state.config.export.filter.orientations[String(option.id)];
+    checkbox.checked = enabled !== false;
+    checkbox.addEventListener('change', () => {
+      state.config.export.filter.orientations[String(option.id)] = checkbox.checked;
+      markConfigDirty();
+      updateZonesList();
+    });
+    const label = document.createElement('span');
+    label.textContent = option.label;
+    wrapper.appendChild(checkbox);
+    wrapper.appendChild(label);
+    orientationFiltersContainer.appendChild(wrapper);
+  });
+}
+
+function renderSelectedObjectPanel() {
+  if (!selectedObjectPanel) return;
+  const object = getObjectById(state.selectedObjectId);
+  if (!object) {
+    selectedObjectPanel.style.display = 'none';
+    return;
+  }
+  selectedObjectPanel.style.display = 'flex';
+  const orientationId = Number.isInteger(object.class_orientation_id)
+    ? object.class_orientation_id
+    : ORIENT_DEFAULT_ID;
+  if (objectOrientationSelect) {
+    objectOrientationSelect.value = String(orientationId);
+  }
+  if (selectedObjectWarnings) {
+    const warnings = object.validation?.warnings || [];
+    selectedObjectWarnings.textContent = warnings.join(' · ');
+  }
+}
+
+function updateOrientationIssues() {
+  if (!orientationIssuesBanner) return;
+  let missing = 0;
+  Object.values(state.annotations).forEach(annotation => {
+    annotation.objects.forEach(object => {
+      if (!Number.isInteger(object.class_orientation_id) || object.class_orientation_id < 0 || object.class_orientation_id >= ORIENTATION_COUNT || object.meta?.orientationDefaulted) {
+        missing += 1;
+      }
+    });
+  });
+  state.orientationIssues.missing = missing;
+  orientationIssuesBanner.innerHTML = '';
+  if (state.config.export.expandOrientations && missing > 0) {
+    orientationIssuesBanner.style.display = 'flex';
+    orientationIssuesBanner.style.justifyContent = 'space-between';
+    orientationIssuesBanner.style.alignItems = 'center';
+    const text = document.createElement('span');
+    text.textContent = `${missing} objeto(s) sin orientación definida. Asigna una orientación antes de exportar expandido.`;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Asignar Top a todos';
+    button.addEventListener('click', () => {
+      assignDefaultOrientationToAll();
+    });
+    orientationIssuesBanner.appendChild(text);
+    orientationIssuesBanner.appendChild(button);
+  } else {
+    orientationIssuesBanner.style.display = 'none';
+  }
+}
+
+function assignDefaultOrientationToAll() {
+  const affectedFiles = new Set();
+  Object.values(state.annotations).forEach(annotation => {
+    annotation.objects.forEach(object => {
+      if (!Number.isInteger(object.class_orientation_id) || object.class_orientation_id < 0 || object.class_orientation_id >= ORIENTATION_COUNT || object.meta?.orientationDefaulted) {
+        object.class_orientation_id = ORIENT_DEFAULT_ID;
+        if (object.meta) {
+          delete object.meta.orientationDefaulted;
+        }
+        updateDerivedData(annotation, object);
+        affectedFiles.add(annotation.file_name);
+      }
+    });
+  });
+  affectedFiles.forEach(fileName => {
+    if (fileName) {
+      state.dirtyImages.add(fileName);
+    }
+  });
+  updateOrientationIssues();
+  updateZonesList();
+  redrawCanvas();
+  showToast('Se asignó orientación por defecto (Top) a los objetos pendientes.', 'info');
+}
+
+function syncConfigWithClasses() {
+  if (!state.config || !state.config.export || !state.config.export.filter) {
+    state.config = createDefaultConfig();
+  }
+  const current = state.config.export.filter.classes || {};
+  const updated = {};
+  state.classes.forEach(className => {
+    if (Object.prototype.hasOwnProperty.call(current, className)) {
+      updated[className] = current[className];
+    } else {
+      updated[className] = className.toLowerCase() === 'aletas' ? false : true;
+    }
+  });
+  state.config.export.filter.classes = updated;
+  if (!state.config.export.filter.orientations) {
+    state.config.export.filter.orientations = {};
+  }
+  ORIENTATIONS.forEach(option => {
+    if (!Object.prototype.hasOwnProperty.call(state.config.export.filter.orientations, String(option.id))) {
+      state.config.export.filter.orientations[String(option.id)] = true;
+    }
+  });
+}
+
+function isObjectEnabledByConfig(object, config = state.config) {
+  if (!object || !config || !config.export) return false;
+  const filters = config.export.filter || {};
+  const classesFilter = filters.classes || {};
+  const orientationsFilter = filters.orientations || {};
+  const classEnabled = classesFilter[object.class_name] !== false;
+  if (!classEnabled) return false;
+  const orientationId = Number.isInteger(object.class_orientation_id)
+    ? object.class_orientation_id
+    : ORIENT_DEFAULT_ID;
+  const orientationEnabled = orientationsFilter[String(orientationId)] !== false;
+  if (!orientationEnabled) return false;
+  if (!object.isValid || object.validation?.blockExport) return false;
+  if (config.export.missingOrientationPolicy === 'skip' && object.meta?.orientationDefaulted) {
+    return false;
+  }
+  return true;
+}
+
 function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
   if (!item || !item.file_name) {
     return null;
@@ -239,14 +762,27 @@ function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
       const cleanPolygon = Array.isArray(obj.polygon)
         ? obj.polygon.map(pt => ({ x: Number(pt.x), y: Number(pt.y) }))
         : [];
+      const rawOrientation = Number(obj.class_orientation_id);
+      let orientationId = Number.isInteger(rawOrientation) ? rawOrientation : ORIENT_DEFAULT_ID;
+      let orientationDefaulted = false;
+      if (!Number.isInteger(rawOrientation) || rawOrientation < 0 || rawOrientation >= ORIENTATION_COUNT) {
+        orientationId = ORIENT_DEFAULT_ID;
+        orientationDefaulted = true;
+      }
+      const meta = obj.meta ? { ...obj.meta } : {};
+      if (orientationDefaulted) {
+        meta.orientationDefaulted = true;
+      }
       return {
         id: obj.id || crypto.randomUUID(),
         class_name: obj.class_name,
         class_id: typeof obj.class_id === 'number' ? obj.class_id : state.classMap.get(obj.class_name) || 0,
+        class_orientation_id: orientationId,
         polygon: cleanPolygon,
         bbox: obj.bbox || null,
         isValid: obj.isValid !== false,
-        meta: obj.meta || {}
+        meta,
+        enabled: obj.enabled !== false
       };
     });
   } else {
@@ -260,10 +796,12 @@ function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
           id: crypto.randomUUID(),
           class_name: zoneName,
           class_id: state.classMap.get(zoneName) ?? 0,
+          class_orientation_id: ORIENT_DEFAULT_ID,
           polygon,
           bbox: entry ? { x: entry.x, y: entry.y, w: entry.w, h: entry.h } : null,
           isValid: true,
-          meta: { migrated: true }
+          meta: { migrated: true, orientationDefaulted: true },
+          enabled: true
         };
         objects.push(object);
         migrationStats.migrated += 1;
@@ -635,6 +1173,7 @@ function handleKeyDown(event) {
         markImageDirty(annotation.file_name);
         state.selectedObjectId = null;
         state.selectedVertexIndex = null;
+        renderSelectedObjectPanel();
         updateZonesList();
         redrawCanvas();
       }
@@ -664,24 +1203,46 @@ async function saveAnnotations() {
   }
   const annotations = Object.values(state.annotations);
   const perImageLines = {};
+  const filteredAnnotations = [];
+  const fullAnnotations = [];
   state.annotationErrors.clear();
-  Object.values(state.annotations).forEach(annotation => {
-    const validation = generateYoloLines(annotation);
-    if (validation.lines) {
-      perImageLines[annotation.file_name] = validation.lines;
-    }
+
+  annotations.forEach(annotation => {
+    const fullClone = cloneData(annotation);
+    fullClone.objects = fullClone.objects.map((obj, index) => {
+      const original = annotation.objects[index];
+      const enabled = isObjectEnabledByConfig(original);
+      return { ...obj, enabled };
+    });
+    fullAnnotations.push(fullClone);
+
+    const filteredClone = cloneData(annotation);
+    filteredClone.objects = [];
+    annotation.objects.forEach(original => {
+      if (isObjectEnabledByConfig(original)) {
+        const cloneObj = cloneData(original);
+        cloneObj.enabled = true;
+        filteredClone.objects.push(cloneObj);
+      }
+    });
+    filteredAnnotations.push(filteredClone);
+
+    const validation = generateYoloLines(annotation, state.config, state.classMap);
+    perImageLines[annotation.file_name] = validation.lines;
     if (validation.errors.length > 0) {
       state.annotationErrors.set(annotation.file_name, validation.errors);
     } else {
       state.annotationErrors.delete(annotation.file_name);
     }
   });
+
   updateZonesList();
   try {
     state.saveInProgress = true;
-    const jsonlResult = await window.electronAPI.saveJsonl(annotations);
+    const jsonlResult = await window.electronAPI.saveJsonl({ filtered: filteredAnnotations, full: fullAnnotations });
     if (!jsonlResult.success) {
-      throw new Error(jsonlResult.error || 'Error desconocido al guardar JSONL');
+      const detail = jsonlResult.details ? ` Detalles: ${JSON.stringify(jsonlResult.details)}` : '';
+      throw new Error((jsonlResult.error || 'Error desconocido al guardar JSONL') + detail);
     }
     const txtResult = await window.electronAPI.saveYoloTxtBatch(perImageLines);
     if (!txtResult.success) {
@@ -721,10 +1282,12 @@ function finalizeDraftPolygon() {
     id: crypto.randomUUID(),
     class_name: draft.className,
     class_id: draft.classId,
+    class_orientation_id: state.currentOrientationId,
     polygon: draft.points.map(pt => ({ x: pt.x, y: pt.y })),
     bbox: null,
     isValid: true,
-    meta: {}
+    meta: {},
+    enabled: true
   };
   updateDerivedData(annotation, object);
   annotation.objects.push(object);
@@ -737,6 +1300,7 @@ function finalizeDraftPolygon() {
 function selectObject(objectId, vertexIndex) {
   state.selectedObjectId = objectId;
   state.selectedVertexIndex = vertexIndex != null ? vertexIndex : null;
+  renderSelectedObjectPanel();
   redrawCanvas();
 }
 
@@ -855,12 +1419,27 @@ function updateDerivedData(annotation, object) {
   } else if (typeof object.class_id !== 'number') {
     object.class_id = 0;
   }
+  const orientationId = Number(object.class_orientation_id);
+  if (!Number.isInteger(orientationId) || orientationId < 0 || orientationId >= ORIENTATION_COUNT) {
+    object.class_orientation_id = ORIENT_DEFAULT_ID;
+    object.meta = object.meta || {};
+    object.meta.orientationDefaulted = true;
+  } else if (object.meta && object.meta.orientationDefaulted) {
+    delete object.meta.orientationDefaulted;
+  }
   if (!object.meta) {
     object.meta = {};
   }
   const bbox = computeBoundingBox(object.polygon);
   object.bbox = bbox;
   const validation = validatePolygon(annotation, object);
+  validation.warnings = Array.isArray(validation.warnings) ? validation.warnings : [];
+  if (object.meta?.orientationDefaulted) {
+    const message = `Orientación por defecto aplicada (${getOrientationLabel(ORIENT_DEFAULT_ID)}).`;
+    if (!validation.warnings.includes(message)) {
+      validation.warnings.push(message);
+    }
+  }
   object.isValid = validation.errors.length === 0;
   object.validation = validation;
 }
@@ -1094,7 +1673,9 @@ function drawPolygonLabel(object) {
   ctx.fillStyle = '#222';
   ctx.font = '14px sans-serif';
   ctx.textBaseline = 'bottom';
-  ctx.fillText(object.class_name || `clase ${object.class_id}`, x + 6, y - 6);
+  const orientationKey = getOrientationKey(object.class_orientation_id);
+  const label = object.class_name ? `${object.class_name}:${orientationKey}` : `clase ${object.class_id}`;
+  ctx.fillText(label, x + 6, y - 6);
   ctx.restore();
 }
 
@@ -1168,6 +1749,7 @@ function updateZonesList() {
     const header = document.createElement('div');
     const invalidCount = objects.filter(obj => !obj.isValid).length;
     const blockedCount = objects.filter(obj => obj.validation?.blockExport).length;
+    const enabledCount = objects.filter(obj => isObjectEnabledByConfig(obj)).length;
     const summaryParts = [`${className} (${objects.length})`];
     if (invalidCount) {
       summaryParts.push(`${invalidCount} inválidos`);
@@ -1175,6 +1757,7 @@ function updateZonesList() {
     if (blockedCount) {
       summaryParts.push(`${blockedCount} con advertencias`);
     }
+    summaryParts.push(`${enabledCount} exportables`);
     header.textContent = summaryParts.join(' · ');
     header.classList.add('class-group-header');
     container.appendChild(header);
@@ -1185,11 +1768,23 @@ function updateZonesList() {
       if (object.id === state.selectedObjectId) {
         item.classList.add('active');
       }
-      item.textContent = `ID ${object.id.slice(0, 8)} · ${object.polygon.length} vértices`;
+      const orientationKey = getOrientationKey(object.class_orientation_id);
+      const segments = [`ID ${object.id.slice(0, 8)}`, `${object.polygon.length} vértices`, `ori: ${orientationKey}`];
+      if (!isObjectEnabledByConfig(object)) {
+        segments.push('desactivado');
+        item.style.opacity = '0.6';
+      }
+      if (object.meta?.orientationDefaulted) {
+        segments.push('orientación por defecto');
+      }
+      item.textContent = segments.join(' · ');
       if (!object.isValid) {
         item.classList.add('invalid');
       }
       if (object.validation?.blockExport) {
+        item.classList.add('warning');
+      }
+      if (object.meta?.orientationDefaulted) {
         item.classList.add('warning');
       }
       item.addEventListener('click', () => {
@@ -1215,15 +1810,20 @@ function updateZonesList() {
     errorPanel.appendChild(list);
     zonesList.appendChild(errorPanel);
   }
+  renderSelectedObjectPanel();
 }
 
-function generateYoloLines(annotation) {
+function generateYoloLines(annotation, config, classMap) {
   const lines = [];
   const errors = [];
   if (!annotation || !annotation.width || !annotation.height) {
     errors.push({ objectId: 'image', message: 'La imagen no tiene dimensiones definidas.' });
     return { lines, errors };
   }
+  const { width, height } = annotation;
+  const expandOrientations = Boolean(config?.export?.expandOrientations);
+  const missingPolicy = config?.export?.missingOrientationPolicy || 'default';
+  const filters = config?.export?.filter || {};
   annotation.objects.forEach(object => {
     if (!object.isValid) {
       errors.push({ objectId: object.id, message: (object.validation?.errors || ['Objeto inválido']).join(' · ') });
@@ -1234,20 +1834,54 @@ function generateYoloLines(annotation) {
       errors.push({ objectId: object.id, message: warningMessage });
       return;
     }
-    const coords = [];
-    for (const point of object.polygon) {
-      const x = Number((point.x / annotation.width).toFixed(6));
-      const y = Number((point.y / annotation.height).toFixed(6));
-      if (!Number.isFinite(x) || !Number.isFinite(y)) {
-        errors.push({ objectId: object.id, message: 'Normalización inválida.' });
+    const classEnabled = filters.classes ? filters.classes[object.class_name] !== false : true;
+    if (!classEnabled) {
+      return;
+    }
+    const baseClassId = classMap.get(object.class_name) ?? object.class_id ?? 0;
+    let orientationId = Number.isInteger(object.class_orientation_id) ? object.class_orientation_id : null;
+    const orientationValid = orientationId != null && orientationId >= 0 && orientationId < ORIENTATION_COUNT;
+    if (!orientationValid) {
+      if (missingPolicy === 'skip') {
+        errors.push({ objectId: object.id, message: 'Orientación ausente → objeto omitido.' });
         return;
       }
-      coords.push(x, y);
+      orientationId = ORIENT_DEFAULT_ID;
     }
-    const line = `${object.class_id} ${coords.join(' ')}`;
-    lines.push(line);
+    const orientationKey = String(orientationId);
+    const orientationEnabled = filters.orientations ? filters.orientations[orientationKey] !== false : true;
+    if (!orientationEnabled) {
+      return;
+    }
+    const coords = normalisePolygon(object.polygon, width, height);
+    if (!coords) {
+      errors.push({ objectId: object.id, message: 'Normalización inválida.' });
+      return;
+    }
+    if (expandOrientations) {
+      const finalId = baseClassId * ORIENTATION_COUNT + orientationId;
+      lines.push(`${finalId} ${coords.join(' ')}`);
+    } else {
+      lines.push(`${baseClassId} ${coords.join(' ')}`);
+    }
   });
   return { lines, errors };
+}
+
+function normalisePolygon(polygon, width, height) {
+  if (!polygon || !Array.isArray(polygon)) {
+    return null;
+  }
+  const coords = [];
+  for (const point of polygon) {
+    const x = Number((point.x / width).toFixed(6));
+    const y = Number((point.y / height).toFixed(6));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+    coords.push(x, y);
+  }
+  return coords;
 }
 
 function showToast(message, type = 'info') {
@@ -1307,6 +1941,7 @@ function syncAnnotationsWithClassMap() {
       updateDerivedData(annotation, object);
     });
   });
+  updateOrientationIssues();
 }
 
 // Export helpers for debugging (optional)
