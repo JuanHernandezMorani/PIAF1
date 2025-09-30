@@ -1,24 +1,42 @@
-let state = {
-    images: [],
-    currentImageIndex: -1,
-    currentZone: 'img_zone',
-    drawing: false,
-    startX: 0,
-    startY: 0,
-    currentRect: null,
-    zones: {},
-    selectedZone: null,
-    isDragging: false,
-    isResizing: false,
-    resizeHandle: null,
-    canvasRect: { left: 0, top: 0, width: 0, height: 0 },
-    scale: 1,
-    zoom: 1,
-    panX: 0,
-    panY: 0,
-    isPanning: false,
-    panStartX: 0,
-    panStartY: 0
+const HANDLE_CANVAS_PX = 8;
+const MOVE_HANDLE_CANVAS_PX = 12;
+const MIN_POLYGON_AREA = 5;
+const SAVE_DEBOUNCE_MS = 500;
+
+const state = {
+  images: [],
+  annotations: {},
+  classes: [],
+  classMap: new Map(),
+  colors: new Map(),
+  currentImageIndex: -1,
+  currentLayer: 'base',
+  currentClassName: null,
+  scale: 1,
+  zoom: 1,
+  panX: 0,
+  panY: 0,
+  isPanning: false,
+  panStart: { x: 0, y: 0 },
+  drawingDraft: null,
+  selectedObjectId: null,
+  selectedVertexIndex: null,
+  draggingVertex: false,
+  draggingObject: false,
+  dragStartPoint: null,
+  dragStartPolygon: null,
+  hoveredHandle: null,
+  hoveredMoveHandle: null,
+  hoveredObjectId: null,
+  canvasRect: { left: 0, top: 0, width: 0, height: 0 },
+  imageElement: null,
+  dirtyImages: new Set(),
+  annotationErrors: new Map(),
+  saveInProgress: false,
+  lastSaveTs: 0,
+  migrationCount: 0,
+  loadErrors: [],
+  migrationNotified: false
 };
 
 const canvas = document.getElementById('imageCanvas');
@@ -30,734 +48,1266 @@ const layerSelect = document.getElementById('layerSelect');
 const saveBtn = document.getElementById('saveBtn');
 const prevBtn = document.getElementById('prevBtn');
 const nextBtn = document.getElementById('nextBtn');
-const imageName = document.getElementById('imageName');
-const imageIndex = document.getElementById('imageIndex');
+const imageNameLabel = document.getElementById('imageName');
+const imageIndexLabel = document.getElementById('imageIndex');
 const noImages = document.getElementById('noImages');
 
-const colors = {
-    'img_zone': 'grey', 'eyes': 'red', 'wings': 'blue', 'chest': 'green',
-    'back': 'yellow', 'extremities': 'orange', 'fangs': 'purple', 
-    'claws': 'cyan', 'head': 'pink', 'mouth': 'darkred',
-    'heart': 'darkorange', 'cracks': 'lightgrey', 'cristal': 'violet',
-    'flower': 'lightgreen', 'zombie_zone': 'darkgreen', 'armor': 'darkblue',
-    'sky': 'lightblue', 'stars': 'white', 'extra': 'magenta'
-};
+let toastContainer;
+let bannerContainer;
 
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
-    const imagesResult = await window.electronAPI.loadImages();
-    if (imagesResult.success) {
-        state.images = imagesResult.images;
-        if (state.images.length > 0) {
-            noImages.style.display = 'none';
-            canvas.style.display = 'block';
-            await loadExistingData();
-            state.currentImageIndex = 0;
-            loadImage(state.currentImageIndex);
-            updateImageList();
-        } else {
-            noImages.style.display = 'block';
-            canvas.style.display = 'none';
-        }
-    } else {
-        alert('Error al cargar imágenes: ' + imagesResult.error);
-    }
-    
-    setupEventListeners();
+  setupAuxiliaryContainers();
+  setupEventListeners();
+  await loadClasses();
+  await loadImages();
+  await loadExistingData();
+  updateImageList();
+  if (state.images.length > 0) {
+    setCurrentImage(0);
+    noImages.style.display = 'none';
+    canvas.style.display = 'block';
+  } else {
+    noImages.style.display = 'block';
+    canvas.style.display = 'none';
+  }
 }
 
-async function loadExistingData() {
-    const result = await window.electronAPI.loadExistingData();
-    if (result.success && result.data) {
-        const existingData = result.data;
-        const missingImages = [];
-        const imageNames = new Set(state.images.map(img => img.name));
-        
-        existingData.forEach(item => {
-            const fileName = item.file_name;
-            if (imageNames.has(fileName)) {
-                if (!state.zones[fileName]) {
-                    state.zones[fileName] = {
-                        layer: 'base',
-                        img_zone: [], eyes: [], wings: [], chest: [], back: [],
-                        extremities: [], fangs: [], claws: [], head: [], mouth: [],
-                        heart: [], cracks: [], cristal: [], flower: [], zombie_zone: [],
-                        armor: [], sky: [], stars: [], extra: []
-                    };
-                }
-                if (item.layer) {
-                    state.zones[fileName].layer = item.layer;
-                }
-                const zoneTypes = Object.keys(state.zones[fileName]).filter(z => z !== 'layer');
-                zoneTypes.forEach(zoneType => {
-                    if (item[zoneType] && Array.isArray(item[zoneType])) {
-                        state.zones[fileName][zoneType] = item[zoneType].map(zone => ({
-                            x: zone.x,
-                            y: zone.y,
-                            w: zone.w,
-                            h: zone.h
-                        }));
-                    }
-                });
-            } else {
-                missingImages.push(fileName);
-            }
-        });
-        
-        if (missingImages.length > 0) {
-            if (missingImages.length <= 10) {
-                alert(`Advertencia: ${missingImages.length} imágenes del archivo trainData.jsonl no se encontraron en la carpeta:\n${missingImages.join('\n')}`);
-            } else {
-                alert(`Advertencia: ${missingImages.length} imágenes del archivo trainData.jsonl no se encontraron en la carpeta. Verifica la consola para ver la lista completa.`);
-            }
-        }
-        
-        if (state.currentImageIndex >= 0) {
-            redrawCanvas();
-            updateZonesList();
-        }
-    }
+function setupAuxiliaryContainers() {
+  toastContainer = document.createElement('div');
+  toastContainer.id = 'toastContainer';
+  toastContainer.style.position = 'fixed';
+  toastContainer.style.bottom = '16px';
+  toastContainer.style.right = '16px';
+  toastContainer.style.display = 'flex';
+  toastContainer.style.flexDirection = 'column';
+  toastContainer.style.gap = '8px';
+  toastContainer.style.zIndex = '9999';
+  document.body.appendChild(toastContainer);
+
+  bannerContainer = document.createElement('div');
+  bannerContainer.id = 'bannerContainer';
+  bannerContainer.style.position = 'fixed';
+  bannerContainer.style.top = '16px';
+  bannerContainer.style.left = '50%';
+  bannerContainer.style.transform = 'translateX(-50%)';
+  bannerContainer.style.zIndex = '9998';
+  bannerContainer.style.display = 'flex';
+  bannerContainer.style.flexDirection = 'column';
+  bannerContainer.style.gap = '8px';
+  document.body.appendChild(bannerContainer);
 }
 
 function setupEventListeners() {
-    zoneSelect.addEventListener('change', () => {
-        state.currentZone = zoneSelect.value;
-        state.selectedZone = null;
-        updateZonesList();
-        redrawCanvas();
-    });
-    
-    canvas.addEventListener('mousedown', startDrawing);
-    window.addEventListener('mousemove', drawing);
-    window.addEventListener('mouseup', stopDrawing);
-    
-    saveBtn.addEventListener('click', saveData);
-    prevBtn.addEventListener('click', prevImage);
-    nextBtn.addEventListener('click', nextImage);
-    
-    document.addEventListener('keydown', handleKeydown);
-    
-    layerSelect.addEventListener('change', updateLayer);
-    
-    window.addEventListener('resize', () => {
-        if (state.currentImageIndex >= 0) {
-            loadImage(state.currentImageIndex);
-        }
-    });
-    
-    canvas.addEventListener('wheel', handleWheel);
+  zoneSelect.addEventListener('change', () => {
+    state.currentClassName = zoneSelect.value;
+    redrawCanvas();
+  });
+
+  layerSelect.addEventListener('change', () => {
+    const annotation = getCurrentAnnotation();
+    if (annotation) {
+      annotation.layer = layerSelect.value;
+      markImageDirty(annotation.file_name);
+    }
+  });
+
+  saveBtn.addEventListener('click', () => triggerSave(false));
+  prevBtn.addEventListener('click', () => navigateImage(-1));
+  nextBtn.addEventListener('click', () => navigateImage(1));
+
+  canvas.addEventListener('mousedown', handleMouseDown);
+  window.addEventListener('mousemove', handleMouseMove);
+  window.addEventListener('mouseup', handleMouseUp);
+  canvas.addEventListener('mouseleave', () => {
+    state.hoveredHandle = null;
+    state.hoveredMoveHandle = null;
+    state.hoveredObjectId = null;
+    redrawCanvas();
+  });
+  canvas.addEventListener('wheel', handleWheel, { passive: false });
+  canvas.addEventListener('dblclick', handleDoubleClick);
+
+  document.addEventListener('keydown', handleKeyDown);
+  window.addEventListener('resize', () => {
+    if (state.currentImageIndex >= 0) {
+      fitImageToCanvas();
+      redrawCanvas();
+    }
+  });
 }
 
-function loadImage(index) {
-    if (index < 0 || index >= state.images.length) return;
-    
-    state.currentImageIndex = index;
-    const image = state.images[index];
-    
-    if (!state.zones[image.name]) {
-        state.zones[image.name] = {
-            layer: 'base',
-            img_zone: [], eyes: [], wings: [], chest: [], back: [],
-            extremities: [], fangs: [], claws: [], head: [], mouth: [],
-            heart: [], cracks: [], cristal: [], flower: [], zombie_zone: [],
-            armor: [], sky: [], stars: [], extra: []
-        };
+async function loadClasses() {
+  const result = await window.electronAPI.loadClasses();
+  if (!result.success) {
+    showToast(`Error al cargar classes.txt: ${result.error}`, 'error');
+    state.classes = [];
+  } else {
+    state.classes = result.classes || [];
+    if (result.inferred) {
+      showBanner(`Se generó classes.txt con ${state.classes.length} clases inferidas.`);
     }
-    
-    imageName.textContent = image.name;
-    imageIndex.textContent = `${index + 1}/${state.images.length}`;
-    layerSelect.value = state.zones[image.name].layer;
-    
-    updateImageList();
+  }
+  buildClassSelector();
+  syncAnnotationsWithClassMap();
+}
+
+function buildClassSelector() {
+  zoneSelect.innerHTML = '';
+  state.classMap = new Map();
+  state.colors = new Map();
+  state.classes.forEach((className, index) => {
+    const option = document.createElement('option');
+    option.value = className;
+    option.textContent = `${index + 1}. ${className}`;
+    zoneSelect.appendChild(option);
+    state.classMap.set(className, index);
+    state.colors.set(className, generateColorForClass(className));
+  });
+  if (state.classes.length > 0) {
+    zoneSelect.value = state.classes[0];
+    state.currentClassName = state.classes[0];
+  } else {
+    state.currentClassName = null;
+  }
+}
+
+function generateColorForClass(className) {
+  let hash = 0;
+  for (let i = 0; i < className.length; i += 1) {
+    hash = (hash << 5) - hash + className.charCodeAt(i);
+    hash |= 0;
+  }
+  const r = (hash & 0xff0000) >> 16;
+  const g = (hash & 0x00ff00) >> 8;
+  const b = hash & 0x0000ff;
+  const base = [Math.abs(r) % 200, Math.abs(g) % 200, Math.abs(b) % 200];
+  return `rgba(${base[0]}, ${base[1]}, ${base[2]}, 0.4)`;
+}
+
+async function loadImages() {
+  const imagesResult = await window.electronAPI.loadImages();
+  if (!imagesResult.success) {
+    showToast(`Error al cargar imágenes: ${imagesResult.error}`, 'error');
+    state.images = [];
+    return;
+  }
+  state.images = imagesResult.images || [];
+}
+
+async function loadExistingData() {
+  const result = await window.electronAPI.loadExistingData();
+  if (!result.success) {
+    showToast(`No se pudo cargar trainData.jsonl: ${result.error}`, 'error');
+    return;
+  }
+  const migrationStats = { migrated: 0 };
+  (result.data || []).forEach(item => {
+    const annotation = normalizeAnnotation(item, migrationStats);
+    if (annotation && annotation.file_name) {
+      state.annotations[annotation.file_name] = annotation;
+    }
+  });
+  state.migrationCount = migrationStats.migrated;
+  syncAnnotationsWithClassMap();
+  if (state.migrationCount > 0 && !state.migrationNotified) {
+    showBanner(`Se migraron ${state.migrationCount} cajas a polígonos rectangulares.`);
+    state.migrationNotified = true;
+  }
+  if (Array.isArray(result.errors) && result.errors.length > 0) {
+    result.errors.forEach(error => {
+      state.loadErrors.push(error);
+    });
+    showToast(`Se omitieron ${result.errors.length} líneas corruptas en trainData.jsonl`, 'warning');
+  }
+}
+
+function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
+  if (!item || !item.file_name) {
+    return null;
+  }
+  const base = {
+    file_name: item.file_name,
+    width: item.width || null,
+    height: item.height || null,
+    layer: item.layer || 'base',
+    objects: []
+  };
+  if (Array.isArray(item.objects)) {
+    base.objects = item.objects.map(obj => {
+      const cleanPolygon = Array.isArray(obj.polygon)
+        ? obj.polygon.map(pt => ({ x: Number(pt.x), y: Number(pt.y) }))
+        : [];
+      return {
+        id: obj.id || crypto.randomUUID(),
+        class_name: obj.class_name,
+        class_id: typeof obj.class_id === 'number' ? obj.class_id : state.classMap.get(obj.class_name) || 0,
+        polygon: cleanPolygon,
+        bbox: obj.bbox || null,
+        isValid: obj.isValid !== false,
+        meta: obj.meta || {}
+      };
+    });
+  } else {
+    const objects = [];
+    const legacyZones = Object.keys(item).filter(key => key !== 'file_name' && key !== 'layer');
+    legacyZones.forEach(zoneName => {
+      const entries = Array.isArray(item[zoneName]) ? item[zoneName] : [];
+      entries.forEach(entry => {
+        const polygon = bboxToPolygon(entry);
+        const object = {
+          id: crypto.randomUUID(),
+          class_name: zoneName,
+          class_id: state.classMap.get(zoneName) ?? 0,
+          polygon,
+          bbox: entry ? { x: entry.x, y: entry.y, w: entry.w, h: entry.h } : null,
+          isValid: true,
+          meta: { migrated: true }
+        };
+        objects.push(object);
+        migrationStats.migrated += 1;
+      });
+    });
+    base.objects = objects;
+  }
+  base.objects.forEach(obj => {
+    updateDerivedData(base, obj);
+  });
+  return base;
+}
+
+function bboxToPolygon(bbox) {
+  if (!bbox) {
+    return [];
+  }
+  const x1 = bbox.x;
+  const y1 = bbox.y;
+  const x2 = bbox.x + bbox.w;
+  const y2 = bbox.y + bbox.h;
+  return [
+    { x: x1, y: y1 },
+    { x: x2, y: y1 },
+    { x: x2, y: y2 },
+    { x: x1, y: y2 }
+  ];
+}
+
+function setCurrentImage(index) {
+  if (index < 0 || index >= state.images.length) {
+    return;
+  }
+  state.currentImageIndex = index;
+  updateImageList();
+  loadCurrentImage();
+}
+
+function navigateImage(direction) {
+  if (state.images.length === 0) return;
+  const newIndex = (state.currentImageIndex + direction + state.images.length) % state.images.length;
+  setCurrentImage(newIndex);
+}
+
+function getCurrentImage() {
+  if (state.currentImageIndex < 0 || state.currentImageIndex >= state.images.length) {
+    return null;
+  }
+  return state.images[state.currentImageIndex];
+}
+
+function getCurrentAnnotation() {
+  const image = getCurrentImage();
+  if (!image) return null;
+  if (!state.annotations[image.name]) {
+    state.annotations[image.name] = {
+      file_name: image.name,
+      width: null,
+      height: null,
+      layer: 'base',
+      objects: []
+    };
+  }
+  return state.annotations[image.name];
+}
+
+function loadCurrentImage() {
+  const image = getCurrentImage();
+  if (!image) {
+    return;
+  }
+  const annotation = getCurrentAnnotation();
+  const img = new Image();
+  img.onload = () => {
+    state.imageElement = img;
+    annotation.width = img.naturalWidth;
+    annotation.height = img.naturalHeight;
+    resizeCanvasToContainer();
+    fitImageToCanvas();
+    layerSelect.value = annotation.layer || 'base';
+    updateImageInfo();
     updateZonesList();
-    
-    const img = new Image();
-    img.onload = function() {
-        const container = canvas.parentElement;
-        const containerWidth = container.clientWidth;
-        const containerHeight = container.clientHeight;
-        
-        const imgRatio = img.width / img.height;
-        const containerRatio = containerWidth / containerHeight;
-        
-        let renderWidth, renderHeight;
-        
-        if (imgRatio > containerRatio) {
-            renderWidth = containerWidth;
-            renderHeight = containerWidth / imgRatio;
-        } else {
-            renderHeight = containerHeight;
-            renderWidth = containerHeight * imgRatio;
-        }
-        
-        canvas.width = containerWidth;
-        canvas.height = containerHeight;
-        
-        state.scale = Math.min(renderWidth / img.width, renderHeight / img.height);
-        
-        const rect = canvas.getBoundingClientRect();
-        state.canvasRect = {
-            left: rect.left,
-            top: rect.top,
-            width: containerWidth,
-            height: containerHeight
-        };
-        
-        state.zoom = 1;
-        state.panX = (containerWidth - img.width * state.scale) / 2;
-        state.panY = (containerHeight - img.height * state.scale) / 2;
-        
-        redrawCanvas();
-    };
-    img.src = image.dataUrl;
-}
-
-function getMousePos(e) {
-    const rect = state.canvasRect;
-    const scale = state.scale * state.zoom;
-    
-    const x = (e.clientX - rect.left - state.panX) / scale;
-    const y = (e.clientY - rect.top - state.panY) / scale;
-    
-    return { x, y };
-}
-
-function startDrawing(e) {
-    if (e.button !== 0) return;
-    
-    const mousePos = getMousePos(e);
-    const x = mousePos.x;
-    const y = mousePos.y;
-    
-    if (x < 0 || y < 0 || x > canvas.width / (state.scale * state.zoom) || y > canvas.height / (state.scale * state.zoom)) return;
-    
-    if (e.ctrlKey || e.metaKey) {
-        state.isPanning = true;
-        state.panStartX = e.clientX - state.panX;
-        state.panStartY = e.clientY - state.panY;
-        canvas.style.cursor = 'grabbing';
-        return;
-    }
-    
-    const handleInfo = getHandleAt(x, y);
-    if (handleInfo) {
-        if (handleInfo.type === 'move') {
-            state.isDragging = true;
-            state.dragStartX = x;
-            state.dragStartY = y;
-        } else {
-            state.isResizing = true;
-            state.resizeHandle = handleInfo.type;
-            state.resizeStartX = x;
-            state.resizeStartY = y;
-        }
-        state.selectedZone = handleInfo.zone;
-        updateZonesList();
-        redrawCanvas();
-        return;
-    }
-    
-    const clickedZone = getZoneAt(x, y, state.currentZone);
-    if (clickedZone) {
-        state.selectedZone = clickedZone;
-        state.isDragging = true;
-        state.dragStartX = x;
-        state.dragStartY = y;
-        updateZonesList();
-        redrawCanvas();
-        return;
-    }
-    
-    state.drawing = true;
-    state.startX = x;
-    state.startY = y;
-    state.currentRect = {
-        x: x,
-        y: y,
-        w: 0,
-        h: 0
-    };
-}
-
-function drawing(e) {
-    if (!state.drawing && !state.isDragging && !state.isResizing && !state.isPanning) return;
-    
-    const mousePos = getMousePos(e);
-    const x = mousePos.x;
-    const y = mousePos.y;
-    
-    if (state.drawing) {
-        redrawCanvas();
-        
-        const w = x - state.startX;
-        const h = y - state.startY;
-        
-        state.currentRect.w = w;
-        state.currentRect.h = h;
-        
-        drawZone(state.currentRect, state.currentZone, 0, true);
-    } else if (state.isDragging && state.selectedZone && state.selectedZone.zoneType === state.currentZone) {
-        const dx = x - state.dragStartX;
-        const dy = y - state.dragStartY;
-        
-        const imageName = state.images[state.currentImageIndex].name;
-        const zone = state.zones[imageName][state.selectedZone.zoneType][state.selectedZone.index];
-        
-        zone.x = Math.max(0, Math.min(1 - zone.w, zone.x + dx));
-        zone.y = Math.max(0, Math.min(1 - zone.h, zone.y + dy));
-        
-        state.dragStartX = x;
-        state.dragStartY = y;
-        
-        redrawCanvas();
-    } else if (state.isResizing && state.selectedZone && state.selectedZone.zoneType === state.currentZone && state.resizeHandle) {
-        const dx = x - state.resizeStartX;
-        const dy = y - state.resizeStartY;
-        
-        const imageName = state.images[state.currentImageIndex].name;
-        const zone = state.zones[imageName][state.selectedZone.zoneType][state.selectedZone.index];
-        
-        const handle = state.resizeHandle;
-        
-        if (handle === 'e') {
-            zone.w = Math.max(0.01, Math.min(1 - zone.x, zone.w + dx));
-        } else if (handle === 'w') {
-            const newX = Math.max(0, Math.min(zone.x + zone.w - 0.01, zone.x + dx));
-            zone.w = Math.max(0.01, zone.w - (newX - zone.x));
-            zone.x = newX;
-        } else if (handle === 's') {
-            zone.h = Math.max(0.01, Math.min(1 - zone.y, zone.h + dy));
-        } else if (handle === 'n') {
-            const newY = Math.max(0, Math.min(zone.y + zone.h - 0.01, zone.y + dy));
-            zone.h = Math.max(0.01, zone.h - (newY - zone.y));
-            zone.y = newY;
-        } else if (handle === 'ne') {
-            zone.w = Math.max(0.01, Math.min(1 - zone.x, zone.w + dx));
-            const newY = Math.max(0, Math.min(zone.y + zone.h - 0.01, zone.y + dy));
-            zone.h = Math.max(0.01, zone.h - (newY - zone.y));
-            zone.y = newY;
-        } else if (handle === 'nw') {
-            const newX = Math.max(0, Math.min(zone.x + zone.w - 0.01, zone.x + dx));
-            zone.w = Math.max(0.01, zone.w - (newX - zone.x));
-            zone.x = newX;
-            const newY = Math.max(0, Math.min(zone.y + zone.h - 0.01, zone.y + dy));
-            zone.h = Math.max(0.01, zone.h - (newY - zone.y));
-            zone.y = newY;
-        } else if (handle === 'se') {
-            zone.w = Math.max(0.01, Math.min(1 - zone.x, zone.w + dx));
-            zone.h = Math.max(0.01, Math.min(1 - zone.y, zone.h + dy));
-        } else if (handle === 'sw') {
-            const newX = Math.max(0, Math.min(zone.x + zone.w - 0.01, zone.x + dx));
-            zone.w = Math.max(0.01, zone.w - (newX - zone.x));
-            zone.x = newX;
-            zone.h = Math.max(0.01, Math.min(1 - zone.y, zone.h + dy));
-        }
-        
-        state.resizeStartX = x;
-        state.resizeStartY = y;
-        
-        redrawCanvas();
-    } else if (state.isPanning) {
-        state.panX = e.clientX - state.panStartX;
-        state.panY = e.clientY - state.panStartY;
-        redrawCanvas();
-    }
-}
-
-function stopDrawing(e) {
-    if (state.drawing && state.currentRect) {
-        if (Math.abs(state.currentRect.w) > 0.001 && Math.abs(state.currentRect.h) > 0.001) {
-            if (state.currentRect.w < 0) {
-                state.currentRect.x += state.currentRect.w;
-                state.currentRect.w = -state.currentRect.w;
-            }
-            if (state.currentRect.h < 0) {
-                state.currentRect.y += state.currentRect.h;
-                state.currentRect.h = -state.currentRect.h;
-            }
-            
-            const imageName = state.images[state.currentImageIndex].name;
-            state.zones[imageName][state.currentZone].push({
-                x: state.currentRect.x,
-                y: state.currentRect.y,
-                w: state.currentRect.w,
-                h: state.currentRect.h
-            });
-            
-            updateZonesList();
-        }
-    }
-    
-    state.drawing = false;
-    state.isDragging = false;
-    state.isResizing = false;
-    state.isPanning = false;
-    canvas.style.cursor = 'crosshair';
-    state.currentRect = null;
     redrawCanvas();
+  };
+  img.onerror = () => {
+    showToast(`No se pudo cargar la imagen ${image.name}`, 'error');
+  };
+  img.src = image.dataUrl;
 }
 
-function drawAllZones() {
-    const imageName = state.images[state.currentImageIndex].name;
-    const zones = state.zones[imageName];
-    
-    if (zones[state.currentZone]) {
-        zones[state.currentZone].forEach((zone, index) => {
-            drawZone(zone, state.currentZone, index, false);
-        });
-    }
+function resizeCanvasToContainer() {
+  const container = canvas.parentElement;
+  const rect = container.getBoundingClientRect();
+  const width = Math.max(rect.width, 100);
+  const height = Math.max(rect.height, 100);
+  canvas.width = width;
+  canvas.height = height;
+  state.canvasRect = { left: rect.left, top: rect.top, width, height };
 }
 
-function drawZone(zone, zoneType, index, isTemp) {
-    const scale = state.scale * state.zoom;
-    const x = zone.x * scale + state.panX;
-    const y = zone.y * scale + state.panY;
-    const w = zone.w * scale;
-    const h = zone.h * scale;
-    
-    ctx.strokeStyle = colors[zoneType];
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x, y, w, h);
-    
-    if (!isTemp) {
-        ctx.fillStyle = 'white';
-        ctx.font = '12px Arial';
-        ctx.fillText(`${zoneType} ${index + 1}`, x + 5, y + 15);
-    }
+function fitImageToCanvas() {
+  if (!state.imageElement) return;
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return;
+  const imgWidth = annotation.width || state.imageElement.naturalWidth || canvas.width;
+  const imgHeight = annotation.height || state.imageElement.naturalHeight || canvas.height;
+  const scaleX = canvas.width / imgWidth;
+  const scaleY = canvas.height / imgHeight;
+  state.scale = Math.min(scaleX, scaleY);
+  state.zoom = 1;
+  const drawnWidth = imgWidth * state.scale * state.zoom;
+  const drawnHeight = imgHeight * state.scale * state.zoom;
+  state.panX = (canvas.width - drawnWidth) / 2;
+  state.panY = (canvas.height - drawnHeight) / 2;
 }
 
-function redrawCanvas() {
-    const image = state.images[state.currentImageIndex];
-    const img = new Image();
-    img.onload = function() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        
-        const scale = state.scale * state.zoom;
-        ctx.drawImage(img, state.panX, state.panY, img.width * scale, img.height * scale);
-        
-        drawAllZones();
-        
-        if (state.drawing && state.currentRect) {
-            drawZone(state.currentRect, state.currentZone, 0, true);
-        }
-        
-        if (state.selectedZone && state.selectedZone.zoneType === state.currentZone) {
-            const imageName = state.images[state.currentImageIndex].name;
-            const zone = state.zones[imageName][state.selectedZone.zoneType][state.selectedZone.index];
-            
-            const x = zone.x * scale + state.panX;
-            const y = zone.y * scale + state.panY;
-            const w = zone.w * scale;
-            const h = zone.h * scale;
-            
-            drawHandles(x, y, w, h);
-        }
-        
-        drawZoomInfo();
-    };
-    img.src = image.dataUrl;
-}
-
-function drawHandles(x, y, w, h) {
-    const handleSize = 8;
-    
-    ctx.fillStyle = '#3498db';
-    ctx.strokeStyle = 'white';
-    ctx.lineWidth = 1;
-    
-    const handles = [
-        { x: x + w/2, y: y - handleSize, type: 'move' },
-        { x: x, y: y, type: 'nw' },
-        { x: x + w, y: y, type: 'ne' },
-        { x: x, y: y + h, type: 'sw' },
-        { x: x + w, y: y + h, type: 'se' },
-        { x: x + w/2, y: y, type: 'n' },
-        { x: x + w, y: y + h/2, type: 'e' },
-        { x: x + w/2, y: y + h, type: 's' },
-        { x: x, y: y + h/2, type: 'w' }
-    ];
-    
-    handles.forEach(handle => {
-        if (handle.type === 'move') {
-            ctx.beginPath();
-            ctx.moveTo(handle.x - handleSize, handle.y);
-            ctx.lineTo(handle.x, handle.y - handleSize);
-            ctx.lineTo(handle.x + handleSize, handle.y);
-            ctx.lineTo(handle.x, handle.y + handleSize);
-            ctx.closePath();
-            ctx.fill();
-            ctx.stroke();
-        } else {
-            ctx.beginPath();
-            ctx.arc(handle.x, handle.y, handleSize/2, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.stroke();
-        }
-    });
-}
-
-function drawZoomInfo() {
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.fillRect(10, 10, 120, 25);
-    
-    ctx.fillStyle = 'white';
-    ctx.font = '14px Arial';
-    ctx.fillText(`Zoom: ${Math.round(state.zoom * 100)}%`, 20, 28);
-}
-
-function getZoneAt(x, y, zoneType = null) {
-    const imageName = state.images[state.currentImageIndex].name;
-    const zones = state.zones[imageName];
-    
-    const typesToCheck = zoneType ? [zoneType] : Object.keys(zones).filter(z => z !== 'layer');
-    
-    for (const type of typesToCheck) {
-        if (type === 'layer') continue;
-        
-        for (let i = 0; i < zones[type].length; i++) {
-            const zone = zones[type][i];
-            const zoneX = zone.x;
-            const zoneY = zone.y;
-            const zoneW = zone.w;
-            const zoneH = zone.h;
-            
-            if (x >= zoneX && x <= zoneX + zoneW && y >= zoneY && y <= zoneY + zoneH) {
-                return { zoneType: type, index: i };
-            }
-        }
-    }
-    
-    return null;
-}
-
-function getHandleAt(x, y) {
-    if (!state.selectedZone || state.selectedZone.zoneType !== state.currentZone) return null;
-    
-    const imageName = state.images[state.currentImageIndex].name;
-    const zone = state.zones[imageName][state.selectedZone.zoneType][state.selectedZone.index];
-    const scale = state.scale * state.zoom;
-    
-    const zoneX = zone.x;
-    const zoneY = zone.y;
-    const zoneW = zone.w;
-    const zoneH = zone.h;
-    
-    const handleSize = 0.02;
-    
-    const handles = [
-        { x: zoneX + zoneW/2, y: zoneY - handleSize, type: 'move', zone: state.selectedZone },
-        { x: zoneX, y: zoneY, type: 'nw', zone: state.selectedZone },
-        { x: zoneX + zoneW, y: zoneY, type: 'ne', zone: state.selectedZone },
-        { x: zoneX, y: zoneY + zoneH, type: 'sw', zone: state.selectedZone },
-        { x: zoneX + zoneW, y: zoneY + zoneH, type: 'se', zone: state.selectedZone },
-        { x: zoneX + zoneW/2, y: zoneY, type: 'n', zone: state.selectedZone },
-        { x: zoneX + zoneW, y: zoneY + zoneH/2, type: 'e', zone: state.selectedZone },
-        { x: zoneX + zoneW/2, y: zoneY + zoneH, type: 's', zone: state.selectedZone },
-        { x: zoneX, y: zoneY + zoneH/2, type: 'w', zone: state.selectedZone }
-    ];
-    
-    for (const handle of handles) {
-        const distance = Math.sqrt(Math.pow(x - handle.x, 2) + Math.pow(y - handle.y, 2));
-        if (distance <= handleSize) {
-            return handle;
-        }
-    }
-    
-    return null;
-}
-
-function handleWheel(e) {
-    e.preventDefault();
-    
-    const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    
-    const zoomIntensity = 0.1;
-    const wheel = e.deltaY < 0 ? 1 : -1;
-    const zoomFactor = Math.exp(wheel * zoomIntensity);
-    
-    const newZoom = Math.max(0.1, Math.min(5, state.zoom * zoomFactor));
-    
-    const scale = state.scale;
-    const mouseImgX = (mouseX - state.panX) / (scale * state.zoom);
-    const mouseImgY = (mouseY - state.panY) / (scale * state.zoom);
-    
-    state.panX = mouseX - mouseImgX * scale * newZoom;
-    state.panY = mouseY - mouseImgY * scale * newZoom;
-    state.zoom = newZoom;
-    
-    redrawCanvas();
+function updateImageInfo() {
+  const image = getCurrentImage();
+  if (!image) {
+    imageNameLabel.textContent = '-';
+    imageIndexLabel.textContent = '0/0';
+    return;
+  }
+  imageNameLabel.textContent = image.name;
+  imageIndexLabel.textContent = `${state.currentImageIndex + 1}/${state.images.length}`;
 }
 
 function updateImageList() {
-    imageList.innerHTML = '';
-    state.images.forEach((image, index) => {
-        const li = document.createElement('li');
-        const zoneCount = getZoneCount(image.name);
-        li.textContent = `${image.name} (${zoneCount})`;
-        if (index === state.currentImageIndex) {
-            li.classList.add('active');
-        }
-        li.addEventListener('click', () => {
-            loadImage(index);
-        });
-        imageList.appendChild(li);
-    });
+  imageList.innerHTML = '';
+  state.images.forEach((img, idx) => {
+    const li = document.createElement('li');
+    li.textContent = img.name;
+    if (idx === state.currentImageIndex) {
+      li.classList.add('active');
+    }
+    li.addEventListener('click', () => setCurrentImage(idx));
+    imageList.appendChild(li);
+  });
 }
 
-function getZoneCount(imageName) {
-    if (!state.zones[imageName]) return 0;
-    let count = 0;
-    for (const zoneType in state.zones[imageName]) {
-        if (zoneType !== 'layer') {
-            count += state.zones[imageName][zoneType].length;
-        }
+function markImageDirty(fileName) {
+  if (fileName) {
+    state.dirtyImages.add(fileName);
+  }
+}
+
+function handleMouseDown(event) {
+  if (!state.imageElement) return;
+  state.canvasRect = canvas.getBoundingClientRect();
+  if (event.ctrlKey || event.metaKey) {
+    state.isPanning = true;
+    state.panStart = { x: event.clientX, y: event.clientY };
+    return;
+  }
+  const point = getImagePointFromEvent(event);
+  if (!point) return;
+
+  if (state.drawingDraft) {
+    const radius = getHandleRadiusImage();
+    const firstPoint = state.drawingDraft.points[0];
+    if (distance(point, firstPoint) <= radius && state.drawingDraft.points.length >= 3) {
+      finalizeDraftPolygon();
+    } else {
+      state.drawingDraft.points.push(point);
     }
-    return count;
+    redrawCanvas();
+    return;
+  }
+
+  const vertexHit = findVertexHandle(point);
+  if (vertexHit) {
+    selectObject(vertexHit.objectId, vertexHit.vertexIndex);
+    state.draggingVertex = true;
+    return;
+  }
+
+  const moveHandleHit = findMoveHandle(point);
+  if (moveHandleHit) {
+    selectObject(moveHandleHit.objectId, null);
+    state.draggingObject = true;
+    state.dragStartPoint = point;
+    state.dragStartPolygon = getObjectById(moveHandleHit.objectId).polygon.map(pt => ({ x: pt.x, y: pt.y }));
+    return;
+  }
+
+  const objectHit = findObjectContainingPoint(point);
+  if (objectHit) {
+    selectObject(objectHit.id, null);
+    state.draggingObject = true;
+    state.dragStartPoint = point;
+    state.dragStartPolygon = objectHit.polygon.map(pt => ({ x: pt.x, y: pt.y }));
+    return;
+  }
+
+  if (!state.currentClassName) {
+    showToast('Selecciona una clase antes de dibujar.', 'warning');
+    return;
+  }
+
+  startDraft(point);
+}
+
+function handleMouseMove(event) {
+  if (!state.imageElement) return;
+  const point = getImagePointFromEvent(event);
+  if (state.isPanning) {
+    const dx = event.clientX - state.panStart.x;
+    const dy = event.clientY - state.panStart.y;
+    state.panX += dx;
+    state.panY += dy;
+    state.panStart = { x: event.clientX, y: event.clientY };
+    redrawCanvas();
+    return;
+  }
+
+  if (state.drawingDraft) {
+    state.drawingDraft.preview = point;
+    redrawCanvas();
+    return;
+  }
+
+  if (state.draggingVertex && state.selectedObjectId) {
+    const annotation = getCurrentAnnotation();
+    const object = getObjectById(state.selectedObjectId);
+    if (object && annotation) {
+      const vertexIndex = state.selectedVertexIndex;
+      if (vertexIndex != null) {
+        object.polygon[vertexIndex] = clampPointToImage(point, annotation);
+        updateDerivedData(annotation, object);
+        markImageDirty(annotation.file_name);
+        updateZonesList();
+        redrawCanvas();
+      }
+    }
+    return;
+  }
+
+  if (state.draggingObject && state.selectedObjectId && state.dragStartPoint) {
+    const annotation = getCurrentAnnotation();
+    const object = getObjectById(state.selectedObjectId);
+    if (object && annotation) {
+      const dx = point.x - state.dragStartPoint.x;
+      const dy = point.y - state.dragStartPoint.y;
+      object.polygon = state.dragStartPolygon.map(pt => clampPointToImage({ x: pt.x + dx, y: pt.y + dy }, annotation));
+      updateDerivedData(annotation, object);
+      markImageDirty(annotation.file_name);
+      updateZonesList();
+      redrawCanvas();
+    }
+    return;
+  }
+
+  state.hoveredHandle = null;
+  state.hoveredMoveHandle = null;
+  state.hoveredObjectId = null;
+
+  if (point) {
+    const vertexHit = findVertexHandle(point);
+    if (vertexHit) {
+      state.hoveredHandle = vertexHit;
+      canvas.style.cursor = 'pointer';
+    } else {
+      const moveHit = findMoveHandle(point);
+      if (moveHit) {
+        state.hoveredMoveHandle = moveHit;
+        canvas.style.cursor = 'move';
+      } else {
+        const objectHit = findObjectContainingPoint(point);
+        if (objectHit) {
+          state.hoveredObjectId = objectHit.id;
+          canvas.style.cursor = 'move';
+        } else {
+          canvas.style.cursor = 'default';
+        }
+      }
+    }
+  }
+  redrawCanvas();
+}
+
+function handleMouseUp() {
+  state.isPanning = false;
+  if (state.draggingVertex) {
+    state.draggingVertex = false;
+    state.selectedVertexIndex = null;
+  }
+  if (state.draggingObject) {
+    state.draggingObject = false;
+    state.dragStartPoint = null;
+    state.dragStartPolygon = null;
+  }
+}
+
+function handleWheel(event) {
+  if (!state.imageElement) return;
+  event.preventDefault();
+  const delta = event.deltaY < 0 ? 1.1 : 0.9;
+  const mousePoint = getCanvasPointFromEvent(event);
+  const beforeZoom = canvasPointToImage(mousePoint.x, mousePoint.y);
+  state.zoom = Math.min(Math.max(state.zoom * delta, 0.1), 10);
+  const afterZoom = canvasPointToImage(mousePoint.x, mousePoint.y);
+  if (beforeZoom && afterZoom) {
+    state.panX += (afterZoom.x - beforeZoom.x) * state.scale * state.zoom;
+    state.panY += (afterZoom.y - beforeZoom.y) * state.scale * state.zoom;
+  }
+  redrawCanvas();
+}
+
+function handleDoubleClick(event) {
+  const annotation = getCurrentAnnotation();
+  if (!annotation || !state.selectedObjectId) return;
+  const object = getObjectById(state.selectedObjectId);
+  if (!object) return;
+  const point = getImagePointFromEvent(event);
+  if (!point) return;
+  const edge = findEdgeForInsertion(object, point);
+  if (edge != null) {
+    object.polygon.splice(edge + 1, 0, point);
+    updateDerivedData(annotation, object);
+    markImageDirty(annotation.file_name);
+    updateZonesList();
+    redrawCanvas();
+  }
+}
+
+function handleKeyDown(event) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+    event.preventDefault();
+    triggerSave(true);
+    return;
+  }
+
+  if (event.key === 'Enter' && state.drawingDraft) {
+    event.preventDefault();
+    finalizeDraftPolygon();
+    return;
+  }
+
+  if (event.key === 'Escape' && state.drawingDraft) {
+    event.preventDefault();
+    state.drawingDraft = null;
+    redrawCanvas();
+    return;
+  }
+
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    const annotation = getCurrentAnnotation();
+    if (!annotation) return;
+    if (state.selectedObjectId && state.selectedVertexIndex != null) {
+      const object = getObjectById(state.selectedObjectId);
+      if (object) {
+        if (object.polygon.length <= 3) {
+          showToast('No es posible eliminar el vértice: el polígono quedaría inválido.', 'warning');
+          return;
+        }
+        object.polygon.splice(state.selectedVertexIndex, 1);
+        state.selectedVertexIndex = null;
+        updateDerivedData(annotation, object);
+        markImageDirty(annotation.file_name);
+        updateZonesList();
+        redrawCanvas();
+      }
+      return;
+    }
+    if (state.selectedObjectId) {
+      const index = annotation.objects.findIndex(obj => obj.id === state.selectedObjectId);
+      if (index >= 0) {
+        annotation.objects.splice(index, 1);
+        markImageDirty(annotation.file_name);
+        state.selectedObjectId = null;
+        state.selectedVertexIndex = null;
+        updateZonesList();
+        redrawCanvas();
+      }
+    }
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key === '0') {
+    event.preventDefault();
+    fitImageToCanvas();
+    redrawCanvas();
+  }
+}
+
+function triggerSave(fromShortcut) {
+  const now = Date.now();
+  if (fromShortcut && now - state.lastSaveTs < SAVE_DEBOUNCE_MS) {
+    return;
+  }
+  state.lastSaveTs = now;
+  saveAnnotations();
+}
+
+async function saveAnnotations() {
+  if (state.saveInProgress) {
+    showToast('Guardado en curso, espera un momento…', 'info');
+    return;
+  }
+  const annotations = Object.values(state.annotations);
+  const perImageLines = {};
+  state.annotationErrors.clear();
+  Object.values(state.annotations).forEach(annotation => {
+    const validation = generateYoloLines(annotation);
+    if (validation.lines) {
+      perImageLines[annotation.file_name] = validation.lines;
+    }
+    if (validation.errors.length > 0) {
+      state.annotationErrors.set(annotation.file_name, validation.errors);
+    } else {
+      state.annotationErrors.delete(annotation.file_name);
+    }
+  });
+  updateZonesList();
+  try {
+    state.saveInProgress = true;
+    const jsonlResult = await window.electronAPI.saveJsonl(annotations);
+    if (!jsonlResult.success) {
+      throw new Error(jsonlResult.error || 'Error desconocido al guardar JSONL');
+    }
+    const txtResult = await window.electronAPI.saveYoloTxtBatch(perImageLines);
+    if (!txtResult.success) {
+      const detail = txtResult.details ? ` Detalles: ${JSON.stringify(txtResult.details)}` : '';
+      throw new Error((txtResult.error || 'Error al guardar etiquetas YOLO') + detail);
+    }
+    state.dirtyImages.clear();
+    showToast('Guardado completado.', 'success');
+  } catch (error) {
+    showToast(`Error al guardar: ${error.message}`, 'error');
+  } finally {
+    state.saveInProgress = false;
+  }
+}
+
+function startDraft(point) {
+  state.drawingDraft = {
+    className: state.currentClassName,
+    classId: state.classMap.get(state.currentClassName) ?? 0,
+    points: [point],
+    preview: null
+  };
+}
+
+function finalizeDraftPolygon() {
+  if (!state.drawingDraft) return;
+  const draft = state.drawingDraft;
+  state.drawingDraft = null;
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return;
+  if (draft.points.length < 3) {
+    showToast('Un polígono debe tener al menos 3 vértices.', 'warning');
+    redrawCanvas();
+    return;
+  }
+  const object = {
+    id: crypto.randomUUID(),
+    class_name: draft.className,
+    class_id: draft.classId,
+    polygon: draft.points.map(pt => ({ x: pt.x, y: pt.y })),
+    bbox: null,
+    isValid: true,
+    meta: {}
+  };
+  updateDerivedData(annotation, object);
+  annotation.objects.push(object);
+  selectObject(object.id, null);
+  markImageDirty(annotation.file_name);
+  updateZonesList();
+  redrawCanvas();
+}
+
+function selectObject(objectId, vertexIndex) {
+  state.selectedObjectId = objectId;
+  state.selectedVertexIndex = vertexIndex != null ? vertexIndex : null;
+  redrawCanvas();
+}
+
+function getObjectById(objectId) {
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return null;
+  return annotation.objects.find(obj => obj.id === objectId) || null;
+}
+
+function getHandleRadiusImage() {
+  return HANDLE_CANVAS_PX / (state.scale * state.zoom);
+}
+
+function getMoveHandleRadiusImage() {
+  return MOVE_HANDLE_CANVAS_PX / (state.scale * state.zoom);
+}
+
+function findVertexHandle(point) {
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return null;
+  const radius = getHandleRadiusImage();
+  for (let i = annotation.objects.length - 1; i >= 0; i -= 1) {
+    const object = annotation.objects[i];
+    for (let j = 0; j < object.polygon.length; j += 1) {
+      const vertex = object.polygon[j];
+      if (distance(point, vertex) <= radius) {
+        return { objectId: object.id, vertexIndex: j };
+      }
+    }
+  }
+  return null;
+}
+
+function findMoveHandle(point) {
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return null;
+  const radius = getMoveHandleRadiusImage();
+  for (let i = annotation.objects.length - 1; i >= 0; i -= 1) {
+    const object = annotation.objects[i];
+    const centroid = getPolygonCentroid(object.polygon);
+    if (centroid && distance(point, centroid) <= radius) {
+      return { objectId: object.id };
+    }
+  }
+  return null;
+}
+
+function findObjectContainingPoint(point) {
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return null;
+  for (let i = annotation.objects.length - 1; i >= 0; i -= 1) {
+    const object = annotation.objects[i];
+    if (pointInPolygon(point, object.polygon)) {
+      return object;
+    }
+  }
+  return null;
+}
+
+function findEdgeForInsertion(object, point) {
+  const radius = getHandleRadiusImage();
+  for (let i = 0; i < object.polygon.length; i += 1) {
+    const a = object.polygon[i];
+    const b = object.polygon[(i + 1) % object.polygon.length];
+    const distanceToEdge = distancePointToSegment(point, a, b);
+    if (distanceToEdge <= radius) {
+      return i;
+    }
+  }
+  return null;
+}
+
+function getImagePointFromEvent(event) {
+  const rect = canvas.getBoundingClientRect();
+  const canvasX = event.clientX - rect.left;
+  const canvasY = event.clientY - rect.top;
+  return canvasPointToImage(canvasX, canvasY);
+}
+
+function getCanvasPointFromEvent(event) {
+  const rect = canvas.getBoundingClientRect();
+  const canvasX = event.clientX - rect.left;
+  const canvasY = event.clientY - rect.top;
+  return { x: canvasX, y: canvasY };
+}
+
+function canvasPointToImage(canvasX, canvasY) {
+  if (!state.imageElement) return null;
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return null;
+  const x = (canvasX - state.panX) / (state.scale * state.zoom);
+  const y = (canvasY - state.panY) / (state.scale * state.zoom);
+  if (Number.isFinite(x) && Number.isFinite(y)) {
+    return { x, y };
+  }
+  return null;
+}
+
+function imagePointToCanvas(point) {
+  return {
+    x: state.panX + point.x * state.scale * state.zoom,
+    y: state.panY + point.y * state.scale * state.zoom
+  };
+}
+
+function clampPointToImage(point, annotation) {
+  return {
+    x: Math.min(Math.max(point.x, 0), annotation.width || point.x),
+    y: Math.min(Math.max(point.y, 0), annotation.height || point.y)
+  };
+}
+
+function updateDerivedData(annotation, object) {
+  if (state.classMap.has(object.class_name)) {
+    object.class_id = state.classMap.get(object.class_name);
+  } else if (typeof object.class_id !== 'number') {
+    object.class_id = 0;
+  }
+  if (!object.meta) {
+    object.meta = {};
+  }
+  const bbox = computeBoundingBox(object.polygon);
+  object.bbox = bbox;
+  const validation = validatePolygon(annotation, object);
+  object.isValid = validation.errors.length === 0;
+  object.validation = validation;
+}
+
+function computeBoundingBox(polygon) {
+  if (!polygon || polygon.length === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  polygon.forEach(pt => {
+    minX = Math.min(minX, pt.x);
+    minY = Math.min(minY, pt.y);
+    maxX = Math.max(maxX, pt.x);
+    maxY = Math.max(maxY, pt.y);
+  });
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function validatePolygon(annotation, object) {
+  const errors = [];
+  const warnings = [];
+  let blockExport = false;
+  const polygon = object.polygon || [];
+  if (!Array.isArray(polygon) || polygon.length < 3) {
+    errors.push('El polígono debe tener al menos 3 vértices.');
+    return { errors, warnings, blockExport };
+  }
+  const { width, height } = annotation;
+  for (let i = 0; i < polygon.length; i += 1) {
+    const point = polygon[i];
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+      errors.push('Coordenadas inválidas.');
+      break;
+    }
+    if (width && (point.x < 0 || point.x > width) || height && (point.y < 0 || point.y > height)) {
+      warnings.push('Algunos vértices fueron ajustados al borde de la imagen.');
+    }
+  }
+  const area = Math.abs(polygonArea(polygon));
+  if (area < MIN_POLYGON_AREA) {
+    errors.push('El área del polígono es demasiado pequeña.');
+  }
+  if (hasSelfIntersection(polygon)) {
+    warnings.push('El polígono tiene auto-intersecciones.');
+     blockExport = true;
+  }
+  return { errors, warnings, blockExport };
+}
+
+function polygonArea(polygon) {
+  let area = 0;
+  for (let i = 0; i < polygon.length; i += 1) {
+    const current = polygon[i];
+    const next = polygon[(i + 1) % polygon.length];
+    area += current.x * next.y - next.x * current.y;
+  }
+  return area / 2;
+}
+
+function hasSelfIntersection(polygon) {
+  const n = polygon.length;
+  for (let i = 0; i < n; i += 1) {
+    const a1 = polygon[i];
+    const a2 = polygon[(i + 1) % n];
+    for (let j = i + 1; j < n; j += 1) {
+      if (Math.abs(i - j) <= 1 || (i === 0 && j === n - 1)) {
+        continue;
+      }
+      const b1 = polygon[j];
+      const b2 = polygon[(j + 1) % n];
+      if (segmentsIntersect(a1, a2, b1, b2)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function segmentsIntersect(p1, p2, p3, p4) {
+  const d1 = direction(p3, p4, p1);
+  const d2 = direction(p3, p4, p2);
+  const d3 = direction(p1, p2, p3);
+  const d4 = direction(p1, p2, p4);
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+    return true;
+  }
+  if (d1 === 0 && onSegment(p3, p4, p1)) return true;
+  if (d2 === 0 && onSegment(p3, p4, p2)) return true;
+  if (d3 === 0 && onSegment(p1, p2, p3)) return true;
+  if (d4 === 0 && onSegment(p1, p2, p4)) return true;
+  return false;
+}
+
+function direction(pi, pj, pk) {
+  return (pk.x - pi.x) * (pj.y - pi.y) - (pj.x - pi.x) * (pk.y - pi.y);
+}
+
+function onSegment(pi, pj, pk) {
+  return (
+    Math.min(pi.x, pj.x) <= pk.x && pk.x <= Math.max(pi.x, pj.x) &&
+    Math.min(pi.y, pj.y) <= pk.y && pk.y <= Math.max(pi.y, pj.y)
+  );
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i += 1) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersect = ((yi > point.y) !== (yj > point.y)) &&
+      (point.x < (xj - xi) * (point.y - yi) / (yj - yi + 0.0000001) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function distance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function distancePointToSegment(point, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  if (dx === 0 && dy === 0) {
+    return distance(point, a);
+  }
+  const t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy);
+  const clampedT = Math.max(0, Math.min(1, t));
+  const projection = { x: a.x + clampedT * dx, y: a.y + clampedT * dy };
+  return distance(point, projection);
+}
+
+function getPolygonCentroid(polygon) {
+  if (!polygon || polygon.length === 0) return null;
+  let x = 0;
+  let y = 0;
+  polygon.forEach(point => {
+    x += point.x;
+    y += point.y;
+  });
+  return { x: x / polygon.length, y: y / polygon.length };
+}
+
+function redrawCanvas() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!state.imageElement) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(
+    state.imageElement,
+    state.panX,
+    state.panY,
+    state.imageElement.naturalWidth * state.scale * state.zoom,
+    state.imageElement.naturalHeight * state.scale * state.zoom
+  );
+  ctx.restore();
+  drawObjects();
+  drawDraft();
+  drawOverlay();
+}
+
+function drawObjects() {
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return;
+  annotation.objects.forEach(object => {
+    drawPolygon(object);
+  });
+}
+
+function drawPolygon(object) {
+  if (!object.polygon || object.polygon.length === 0) return;
+  const color = state.colors.get(object.class_name) || 'rgba(255,255,255,0.4)';
+  ctx.save();
+  ctx.beginPath();
+  object.polygon.forEach((point, index) => {
+    const { x, y } = imagePointToCanvas(point);
+    if (index === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  });
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.strokeStyle = object.isValid ? color.replace('0.4', '1') : 'rgba(255,0,0,0.8)';
+  ctx.lineWidth = object.id === state.selectedObjectId ? 3 : 2;
+  ctx.fill();
+  ctx.stroke();
+
+  drawPolygonHandles(object);
+  drawPolygonLabel(object);
+  ctx.restore();
+}
+
+function drawPolygonHandles(object) {
+  const radius = HANDLE_CANVAS_PX;
+  object.polygon.forEach((point, index) => {
+    const { x, y } = imagePointToCanvas(point);
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    ctx.fillStyle = 'white';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = object.id === state.selectedObjectId && state.selectedVertexIndex === index
+      ? '#ff9800'
+      : '#333';
+    ctx.stroke();
+  });
+  const centroid = getPolygonCentroid(object.polygon);
+  if (centroid) {
+    const { x, y } = imagePointToCanvas(centroid);
+    const size = MOVE_HANDLE_CANVAS_PX;
+    ctx.beginPath();
+    ctx.rect(x - size / 2, y - size / 2, size, size);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+function drawPolygonLabel(object) {
+  const centroid = getPolygonCentroid(object.polygon);
+  if (!centroid) return;
+  const { x, y } = imagePointToCanvas(centroid);
+  ctx.save();
+  ctx.fillStyle = '#222';
+  ctx.font = '14px sans-serif';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(object.class_name || `clase ${object.class_id}`, x + 6, y - 6);
+  ctx.restore();
+}
+
+function drawDraft() {
+  if (!state.drawingDraft || state.drawingDraft.points.length === 0) return;
+  ctx.save();
+  ctx.strokeStyle = '#1976d2';
+  ctx.fillStyle = 'rgba(25, 118, 210, 0.2)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  state.drawingDraft.points.forEach((point, index) => {
+    const canvasPoint = imagePointToCanvas(point);
+    if (index === 0) {
+      ctx.moveTo(canvasPoint.x, canvasPoint.y);
+    } else {
+      ctx.lineTo(canvasPoint.x, canvasPoint.y);
+    }
+  });
+  if (state.drawingDraft.preview) {
+    const previewCanvas = imagePointToCanvas(state.drawingDraft.preview);
+    ctx.lineTo(previewCanvas.x, previewCanvas.y);
+  }
+  ctx.stroke();
+  state.drawingDraft.points.forEach(point => {
+    const { x, y } = imagePointToCanvas(point);
+    ctx.beginPath();
+    ctx.arc(x, y, HANDLE_CANVAS_PX, 0, Math.PI * 2);
+    ctx.fillStyle = '#1976d2';
+    ctx.fill();
+  });
+  ctx.restore();
+}
+
+function drawOverlay() {
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return;
+  const zoomPercent = Math.round(state.scale * state.zoom * 100);
+  const totalObjects = annotation.objects.length;
+  const validObjects = annotation.objects.filter(obj => obj.isValid).length;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(10, 10, 220, 60);
+  ctx.fillStyle = '#fff';
+  ctx.font = '14px sans-serif';
+  ctx.fillText(`Zoom: ${zoomPercent}%`, 20, 30);
+  ctx.fillText(`Objetos: ${validObjects}/${totalObjects}`, 20, 50);
+  ctx.restore();
 }
 
 function updateZonesList() {
-    zonesList.innerHTML = '';
-    
-    const imageName = state.images[state.currentImageIndex].name;
-    const zones = state.zones[imageName];
-    
-    if (zones[state.currentZone]) {
-        zones[state.currentZone].forEach((zone, index) => {
-            const zoneItem = document.createElement('div');
-            zoneItem.className = 'zone-item';
-            if (state.selectedZone && 
-                state.selectedZone.zoneType === state.currentZone && 
-                state.selectedZone.index === index) {
-                zoneItem.classList.add('selected');
-            }
-            
-            zoneItem.innerHTML = `
-                <div class="zone-header">
-                    <strong>${state.currentZone} ${index + 1}</strong>
-                    <button class="delete-zone" data-zone-type="${state.currentZone}" data-index="${index}">×</button>
-                </div>
-                <div class="zone-coords">
-                    x: ${zone.x.toFixed(3)}, y: ${zone.y.toFixed(3)}<br>
-                    w: ${zone.w.toFixed(3)}, h: ${zone.h.toFixed(3)}
-                </div>
-            `;
-            
-            zoneItem.addEventListener('click', (e) => {
-                if (!e.target.classList.contains('delete-zone')) {
-                    state.selectedZone = { zoneType: state.currentZone, index };
-                    redrawCanvas();
-                    updateZonesList();
-                }
-            });
-            
-            const deleteBtn = zoneItem.querySelector('.delete-zone');
-            deleteBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                deleteZone(state.currentZone, index);
-            });
-            
-            zonesList.appendChild(zoneItem);
-        });
+  const annotation = getCurrentAnnotation();
+  zonesList.innerHTML = '';
+  if (!annotation) {
+    zonesList.textContent = 'Sin anotaciones.';
+    return;
+  }
+  if (annotation.objects.length === 0) {
+    zonesList.textContent = 'Sin objetos anotados.';
+    return;
+  }
+  const groups = new Map();
+  annotation.objects.forEach(object => {
+    if (!groups.has(object.class_name)) {
+      groups.set(object.class_name, []);
     }
+    groups.get(object.class_name).push(object);
+  });
+  groups.forEach((objects, className) => {
+    const container = document.createElement('div');
+    container.classList.add('class-group');
+    const header = document.createElement('div');
+    const invalidCount = objects.filter(obj => !obj.isValid).length;
+    const blockedCount = objects.filter(obj => obj.validation?.blockExport).length;
+    const summaryParts = [`${className} (${objects.length})`];
+    if (invalidCount) {
+      summaryParts.push(`${invalidCount} inválidos`);
+    }
+    if (blockedCount) {
+      summaryParts.push(`${blockedCount} con advertencias`);
+    }
+    header.textContent = summaryParts.join(' · ');
+    header.classList.add('class-group-header');
+    container.appendChild(header);
+    objects.forEach(object => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.classList.add('object-item');
+      if (object.id === state.selectedObjectId) {
+        item.classList.add('active');
+      }
+      item.textContent = `ID ${object.id.slice(0, 8)} · ${object.polygon.length} vértices`;
+      if (!object.isValid) {
+        item.classList.add('invalid');
+      }
+      if (object.validation?.blockExport) {
+        item.classList.add('warning');
+      }
+      item.addEventListener('click', () => {
+        selectObject(object.id, null);
+      });
+      container.appendChild(item);
+    });
+    zonesList.appendChild(container);
+  });
+  const errors = state.annotationErrors.get(annotation.file_name);
+  if (errors && errors.length > 0) {
+    const errorPanel = document.createElement('div');
+    errorPanel.classList.add('error-panel');
+    const title = document.createElement('strong');
+    title.textContent = `Errores de anotación (${errors.length}):`;
+    errorPanel.appendChild(title);
+    const list = document.createElement('ul');
+    errors.forEach(err => {
+      const li = document.createElement('li');
+      li.textContent = `${err.objectId.slice(0, 8)} · ${err.message}`;
+      list.appendChild(li);
+    });
+    errorPanel.appendChild(list);
+    zonesList.appendChild(errorPanel);
+  }
 }
 
-function deleteZone(zoneType, index) {
-    const imageName = state.images[state.currentImageIndex].name;
-    state.zones[imageName][zoneType].splice(index, 1);
-    
-    if (state.selectedZone && 
-        state.selectedZone.zoneType === zoneType && 
-        state.selectedZone.index === index) {
-        state.selectedZone = null;
+function generateYoloLines(annotation) {
+  const lines = [];
+  const errors = [];
+  if (!annotation || !annotation.width || !annotation.height) {
+    errors.push({ objectId: 'image', message: 'La imagen no tiene dimensiones definidas.' });
+    return { lines, errors };
+  }
+  annotation.objects.forEach(object => {
+    if (!object.isValid) {
+      errors.push({ objectId: object.id, message: (object.validation?.errors || ['Objeto inválido']).join(' · ') });
+      return;
     }
-    
-    redrawCanvas();
-    updateZonesList();
+    if (object.validation?.blockExport) {
+      const warningMessage = object.validation?.warnings?.join(' · ') || 'El objeto tiene advertencias y no se exportó.';
+      errors.push({ objectId: object.id, message: warningMessage });
+      return;
+    }
+    const coords = [];
+    for (const point of object.polygon) {
+      const x = Number((point.x / annotation.width).toFixed(6));
+      const y = Number((point.y / annotation.height).toFixed(6));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        errors.push({ objectId: object.id, message: 'Normalización inválida.' });
+        return;
+      }
+      coords.push(x, y);
+    }
+    const line = `${object.class_id} ${coords.join(' ')}`;
+    lines.push(line);
+  });
+  return { lines, errors };
 }
 
-function updateLayer() {
-    const imageName = state.images[state.currentImageIndex].name;
-    state.zones[imageName].layer = layerSelect.value;
+function showToast(message, type = 'info') {
+  if (!toastContainer) return;
+  const toast = document.createElement('div');
+  toast.textContent = message;
+  toast.style.padding = '10px 16px';
+  toast.style.borderRadius = '4px';
+  toast.style.color = '#fff';
+  toast.style.fontSize = '14px';
+  toast.style.boxShadow = '0 2px 6px rgba(0,0,0,0.3)';
+  toast.style.backgroundColor = {
+    success: '#4caf50',
+    error: '#f44336',
+    warning: '#ff9800',
+    info: '#2196f3'
+  }[type] || '#2196f3';
+  toastContainer.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transition = 'opacity 0.3s';
+    setTimeout(() => {
+      toast.remove();
+    }, 300);
+  }, 4000);
 }
 
-function prevImage() {
-    if (state.currentImageIndex > 0) {
-        loadImage(state.currentImageIndex - 1);
-    }
+function showBanner(message) {
+  if (!bannerContainer) return;
+  const banner = document.createElement('div');
+  banner.textContent = message;
+  banner.style.backgroundColor = '#1976d2';
+  banner.style.color = '#fff';
+  banner.style.padding = '12px 20px';
+  banner.style.borderRadius = '4px';
+  banner.style.boxShadow = '0 2px 6px rgba(0,0,0,0.3)';
+  bannerContainer.appendChild(banner);
+  setTimeout(() => {
+    banner.style.opacity = '0';
+    banner.style.transition = 'opacity 0.4s';
+    setTimeout(() => banner.remove(), 400);
+  }, 6000);
 }
 
-function nextImage() {
-    if (state.currentImageIndex < state.images.length - 1) {
-        loadImage(state.currentImageIndex + 1);
-    }
+function startDraftIfNeeded() {
+  if (!state.drawingDraft && state.currentClassName) {
+    startDraft({ x: 0, y: 0 });
+  }
 }
 
-function handleKeydown(e) {
-    if (e.ctrlKey && e.key === 's') {
-        e.preventDefault();
-        saveData();
-    }
-    
-    if (e.key === 'ArrowLeft') {
-        prevImage();
-    } else if (e.key === 'ArrowRight') {
-        nextImage();
-    }
-    
-    if (e.ctrlKey && e.key === '0') {
-        e.preventDefault();
-        state.zoom = 1;
-        const container = canvas.parentElement;
-        state.panX = (container.clientWidth - canvas.width * state.scale) / 2;
-        state.panY = (container.clientHeight - canvas.height * state.scale) / 2;
-        redrawCanvas();
-    }
-    
-    if (e.ctrlKey && e.key === '=') {
-        e.preventDefault();
-        state.zoom = Math.min(5, state.zoom * 1.2);
-        redrawCanvas();
-    }
-    
-    if (e.ctrlKey && e.key === '-') {
-        e.preventDefault();
-        state.zoom = Math.max(0.1, state.zoom / 1.2);
-        redrawCanvas();
-    }
+function syncAnnotationsWithClassMap() {
+  Object.values(state.annotations).forEach(annotation => {
+    annotation.objects.forEach(object => {
+      if (state.classMap.has(object.class_name)) {
+        object.class_id = state.classMap.get(object.class_name);
+      }
+      updateDerivedData(annotation, object);
+    });
+  });
 }
 
-async function saveData() {
-    const data = [];
-    
-    for (const image of state.images) {
-        if (state.zones[image.name]) {
-            const imageData = {
-                file_name: image.name,
-                layer: state.zones[image.name].layer
-            };
-            
-            for (const zoneType in state.zones[image.name]) {
-                if (zoneType !== 'layer') {
-                    imageData[zoneType] = state.zones[image.name][zoneType].map(zone => ({
-                        x: zone.x,
-                        y: zone.y,
-                        w: zone.w,
-                        h: zone.h
-                    }));
-                }
-            }
-            
-            data.push(imageData);
-        }
-    }
-    
-    const result = await window.electronAPI.saveData(data);
-    if (result.success) {
-        alert('Datos guardados correctamente en trainData.jsonl');
-    } else {
-        alert('Error al guardar: ' + result.error);
-    }
-}
+// Export helpers for debugging (optional)
+window.__DEBUG_STATE__ = state;
