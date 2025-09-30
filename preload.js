@@ -8,5 +8,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveYoloTxtBatch: perImageLines => ipcRenderer.invoke('save-yolo-txt-batch', perImageLines),
   exportDataset: payload => ipcRenderer.invoke('export-dataset', payload),
   loadClasses: () => ipcRenderer.invoke('load-classes'),
-  saveClasses: classes => ipcRenderer.invoke('save-classes', classes)
+  saveClasses: classes => ipcRenderer.invoke('save-classes', classes),
+  loadConfig: () => ipcRenderer.invoke('load-config'),
+  saveConfig: cfg => ipcRenderer.invoke('save-config', cfg),
+  ensureAletas: () => ipcRenderer.invoke('ensure-aletas')
 });

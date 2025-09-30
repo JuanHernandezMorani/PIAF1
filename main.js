@@ -4,16 +4,82 @@ const fs = require('fs');
 
 const fsp = fs.promises;
 
+const ORIENTATIONS = [
+  { id: 0, key: 'top', label: 'Top' },
+  { id: 1, key: 'front', label: 'Front' },
+  { id: 2, key: 'back', label: 'Back' },
+  { id: 3, key: 'left', label: 'Left' },
+  { id: 4, key: 'right', label: 'Right' },
+  { id: 5, key: 'bottom', label: 'Bottom' }
+];
+const ORIENTATION_COUNT = ORIENTATIONS.length;
+const ORIENT_DEFAULT_ID = 0;
+
 let mainWindow;
 
 const projectRoot = __dirname;
 const paths = {
   images: path.join(projectRoot, 'toDraw'),
   jsonl: path.join(projectRoot, 'trainData.jsonl'),
+  fullJsonl: path.join(projectRoot, 'trainData.full.jsonl'),
   labels: path.join(projectRoot, 'labels'),
   classes: path.join(projectRoot, 'classes.txt'),
-  dataset: path.join(projectRoot, 'dataset')
+  dataset: path.join(projectRoot, 'dataset'),
+  config: path.join(projectRoot, 'config.json')
 };
+
+function createDefaultConfig() {
+  const orientationFilter = {};
+  ORIENTATIONS.forEach(orientation => {
+    orientationFilter[String(orientation.id)] = true;
+  });
+  return {
+    export: {
+      expandOrientations: false,
+      missingOrientationPolicy: 'default',
+      filter: {
+        classes: {},
+        orientations: orientationFilter
+      }
+    }
+  };
+}
+
+function deepMerge(base, override) {
+  if (!override || typeof override !== 'object') {
+    return Array.isArray(base) ? base.slice() : { ...base };
+  }
+  const result = Array.isArray(base) ? base.slice() : { ...base };
+  Object.keys(override).forEach(key => {
+    const value = override[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      result[key] = deepMerge(base && base[key] ? base[key] : {}, value);
+    } else {
+      result[key] = value;
+    }
+  });
+  return result;
+}
+
+function mergeConfigWithDefaults(partial) {
+  const defaults = createDefaultConfig();
+  if (!partial || typeof partial !== 'object') {
+    return defaults;
+  }
+  const merged = deepMerge(defaults, partial);
+  if (!merged.export || typeof merged.export !== 'object') {
+    merged.export = defaults.export;
+  }
+  if (!merged.export.filter || typeof merged.export.filter !== 'object') {
+    merged.export.filter = defaults.export.filter;
+  }
+  const orientationFilter = { ...defaults.export.filter.orientations, ...(merged.export.filter.orientations || {}) };
+  merged.export.filter.orientations = orientationFilter;
+  if (!merged.export.filter.classes || typeof merged.export.filter.classes !== 'object') {
+    merged.export.filter.classes = {};
+  }
+  return merged;
+}
 
 const LEGACY_ZONES = [
   'img_zone', 'eyes', 'wings', 'chest', 'back', 'extremities', 'fangs', 'claws',
@@ -59,6 +125,36 @@ async function writeFileAtomic(targetPath, data, options = 'utf8') {
   await fsp.rename(tmpPath, targetPath);
 }
 
+async function readConfigSafe() {
+  const defaults = createDefaultConfig();
+  try {
+    const raw = await fsp.readFile(paths.config, 'utf8');
+    const parsed = JSON.parse(raw);
+    return mergeConfigWithDefaults(parsed);
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      await writeConfigAtomic(defaults);
+      return defaults;
+    }
+    if (err.name === 'SyntaxError') {
+      try {
+        await fsp.rename(paths.config, `${paths.config}.bak`);
+      } catch (renameErr) {
+        console.error('No se pudo respaldar config.json corrupto:', renameErr);
+      }
+      await writeConfigAtomic(defaults);
+      return defaults;
+    }
+    throw err;
+  }
+}
+
+async function writeConfigAtomic(config) {
+  const payload = JSON.stringify(config, null, 2);
+  await ensureDir(path.dirname(paths.config));
+  await writeFileAtomic(paths.config, `${payload}\n`, 'utf8');
+}
+
 async function readJsonlSafe(filePath) {
   try {
     const raw = await fsp.readFile(filePath, 'utf8');
@@ -102,8 +198,11 @@ function sanitiseClasses(list) {
 async function inferClasses() {
   const inferred = new Set();
   try {
-    const { records } = await readJsonlSafe(paths.jsonl);
-    records.forEach(record => {
+    const primary = await readJsonlSafe(paths.fullJsonl);
+    const dataset = primary.records && primary.records.length > 0
+      ? primary.records
+      : (await readJsonlSafe(paths.jsonl)).records;
+    dataset.forEach(record => {
       if (record && Array.isArray(record.objects)) {
         record.objects.forEach(obj => {
           if (obj && obj.class_name) {
@@ -129,6 +228,26 @@ async function inferClasses() {
   const classes = Array.from(inferred);
   classes.sort((a, b) => a.localeCompare(b, 'es'));
   return classes;
+}
+
+async function ensureAletasInClasses() {
+  try {
+    const raw = await fsp.readFile(paths.classes, 'utf8');
+    const entries = raw.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
+    const hasAletas = entries.some(line => line.toLowerCase() === 'aletas');
+    if (!hasAletas) {
+      entries.push('aletas');
+      const unique = sanitiseClasses(entries);
+      await writeFileAtomic(paths.classes, `${unique.join('\n')}\n`, 'utf8');
+      return { success: true, added: true };
+    }
+    return { success: true, added: false };
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return { success: true, added: false };
+    }
+    return { success: false, error: err.message };
+  }
 }
 
 ipcMain.handle('load-images', async () => {
@@ -158,32 +277,58 @@ ipcMain.handle('load-images', async () => {
 
 ipcMain.handle('load-existing-data', async () => {
   try {
-    const { records, errors, missing } = await readJsonlSafe(paths.jsonl);
+    const primary = await readJsonlSafe(paths.fullJsonl);
+    let records = primary.records;
+    let errors = primary.errors;
+    let missing = primary.missing;
+    let source = 'full';
+    if (primary.missing) {
+      const fallback = await readJsonlSafe(paths.jsonl);
+      records = fallback.records;
+      errors = fallback.errors;
+      missing = fallback.missing;
+      source = 'filtered';
+    }
     return {
       success: true,
       data: records,
       errors,
-      missing
+      missing,
+      source
     };
   } catch (error) {
     let detail = error.message;
     if (error.code === 'EACCES') {
-      detail = 'Permiso denegado al leer trainData.jsonl';
+      detail = 'Permiso denegado al leer archivos JSONL';
     }
     return { success: false, error: detail };
   }
 });
 
-async function saveJsonl(data) {
-  const lines = data.map(item => JSON.stringify(item));
-  const payload = lines.join('\n');
-  await writeFileAtomic(paths.jsonl, payload, 'utf8');
+async function saveJsonl(targetPath, data) {
+  const payloadLines = Array.isArray(data) ? data.map(item => JSON.stringify(item)) : [];
+  const payload = payloadLines.join('\n');
+  await writeFileAtomic(targetPath, payload, 'utf8');
 }
 
-const handleSaveJsonl = async (event, data) => {
+const handleSaveJsonl = async (event, payload) => {
+  const normalized = { filtered: [], full: [] };
+  if (Array.isArray(payload)) {
+    normalized.filtered = payload;
+    normalized.full = payload;
+  } else if (payload && typeof payload === 'object') {
+    if (Array.isArray(payload.filtered)) {
+      normalized.filtered = payload.filtered;
+    }
+    if (Array.isArray(payload.full)) {
+      normalized.full = payload.full;
+    }
+  }
+
+  const errors = [];
+
   try {
-    await saveJsonl(data);
-    return { success: true };
+    await saveJsonl(paths.jsonl, normalized.filtered);
   } catch (error) {
     let detail = error.message;
     if (error.code === 'EACCES') {
@@ -191,8 +336,31 @@ const handleSaveJsonl = async (event, data) => {
     } else if (error.code === 'ENOSPC') {
       detail = 'No hay espacio en disco para guardar trainData.jsonl.';
     }
-    return { success: false, error: detail };
+    errors.push({ file: 'trainData.jsonl', error: detail });
   }
+
+  try {
+    await saveJsonl(paths.fullJsonl, normalized.full);
+  } catch (error) {
+    let detail = error.message;
+    if (error.code === 'EACCES') {
+      detail = 'Permiso denegado al guardar trainData.full.jsonl. Ejecuta como administrador o cambia el directorio del proyecto.';
+    } else if (error.code === 'ENOSPC') {
+      detail = 'No hay espacio en disco para guardar trainData.full.jsonl.';
+    }
+    errors.push({ file: 'trainData.full.jsonl', error: detail });
+  }
+
+  if (errors.length > 0) {
+    const first = errors[0];
+    return {
+      success: false,
+      error: `Error al guardar anotaciones: ${first.error}`,
+      details: errors
+    };
+  }
+
+  return { success: true };
 };
 
 ipcMain.handle('save-jsonl', handleSaveJsonl);
@@ -256,6 +424,43 @@ ipcMain.handle('load-classes', async () => {
   }
 });
 
+ipcMain.handle('load-config', async () => {
+  try {
+    const config = await readConfigSafe();
+    return { success: true, config };
+  } catch (error) {
+    let detail = error.message;
+    if (error.code === 'EACCES') {
+      detail = 'Permiso denegado al leer config.json';
+    }
+    return { success: false, error: detail };
+  }
+});
+
+ipcMain.handle('save-config', async (event, newCfg) => {
+  try {
+    const merged = mergeConfigWithDefaults(newCfg);
+    await writeConfigAtomic(merged);
+    return { success: true, config: merged };
+  } catch (error) {
+    let detail = error.message;
+    if (error.code === 'EACCES') {
+      detail = 'Permiso denegado al escribir config.json';
+    } else if (error.code === 'ENOSPC') {
+      detail = 'No hay espacio en disco para guardar config.json';
+    }
+    return { success: false, error: detail };
+  }
+});
+
+ipcMain.handle('ensure-aletas', async () => {
+  const result = await ensureAletasInClasses();
+  if (!result.success) {
+    return { success: false, error: result.error };
+  }
+  return { success: true, added: result.added };
+});
+
 ipcMain.handle('save-classes', async (event, classes) => {
   try {
     const cleaned = sanitiseClasses(Array.isArray(classes) ? classes : []);
@@ -292,6 +497,10 @@ ipcMain.handle('export-dataset', async (event, payload) => {
 
     const splits = payload.splits || { train: 0.7, val: 0.2, test: 0.1 };
     const classNames = sanitiseClasses(payload.classes || []);
+    const expandOrientations = Boolean(payload.expandOrientations);
+    const classDisplayNames = expandOrientations
+      ? classNames.flatMap(className => ORIENTATIONS.map(orientation => `${className}:${orientation.key}`))
+      : classNames.slice();
     const fileNames = payload.images.map(item => item.fileName);
     const shuffled = shuffle(fileNames);
 
@@ -334,11 +543,12 @@ ipcMain.handle('export-dataset', async (event, payload) => {
       }
     }
 
+    const yamlNames = classDisplayNames.map(name => `'${name.replace(/'/g, "''")}'`);
     const datasetYaml = [
-      `train: dataset/images/train`,
-      `val: dataset/images/val`,
-      `test: dataset/images/test`,
-      `names: [${classNames.join(', ')}]`
+      'train: dataset/images/train',
+      'val: dataset/images/val',
+      'test: dataset/images/test',
+      `names: [${yamlNames.join(', ')}]`
     ].join('\n');
 
     await writeFileAtomic(path.join(paths.dataset, 'dataset.yaml'), `${datasetYaml}\n`, 'utf8');
