@@ -98,6 +98,7 @@ const state = {
   hoveredObjectId: null,
   canvasRect: { left: 0, top: 0, width: 0, height: 0 },
   imageElement: null,
+  imageAlphaData: null,
   dirtyImages: new Set(),
   annotationErrors: new Map(),
   saveInProgress: false,
@@ -831,6 +832,179 @@ function bboxToPolygon(bbox) {
   ];
 }
 
+function extractAlphaDataFromImage(image) {
+  const width = image?.naturalWidth || 0;
+  const height = image?.naturalHeight || 0;
+  if (!width || !height) {
+    return null;
+  }
+  const offscreen = document.createElement('canvas');
+  offscreen.width = width;
+  offscreen.height = height;
+  const context = offscreen.getContext('2d');
+  if (!context) {
+    return null;
+  }
+  context.drawImage(image, 0, 0, width, height);
+  let imageData;
+  try {
+    imageData = context.getImageData(0, 0, width, height);
+  } catch (error) {
+    console.warn('No se pudo extraer datos de alpha de la imagen:', error);
+    return null;
+  }
+  const { data } = imageData;
+  let hasAlpha = false;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] < 255) {
+      hasAlpha = true;
+      break;
+    }
+  }
+  return { width: imageData.width, height: imageData.height, data, hasAlpha };
+}
+
+function adjustPolygonToAlpha(polygon, alphaData) {
+  if (!Array.isArray(polygon) || polygon.length === 0) {
+    return { polygon: [], movedVertices: [], autoAdjusted: false, discard: false };
+  }
+  if (!alphaData || !alphaData.hasAlpha || !alphaData.data || !alphaData.width || !alphaData.height) {
+    return { polygon: polygon.map(pt => ({ x: pt.x, y: pt.y })), movedVertices: [], autoAdjusted: false, discard: false };
+  }
+
+  const { width, height, data } = alphaData;
+  if (!width || !height) {
+    return { polygon: polygon.map(pt => ({ x: pt.x, y: pt.y })), movedVertices: [], autoAdjusted: false, discard: false };
+  }
+
+  const adjusted = polygon.map(point => ({ x: point.x, y: point.y }));
+  const moved = new Set();
+
+  const neighborOffsets = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1, 0], /* self */ [1, 0],
+    [-1, 1], [0, 1], [1, 1]
+  ];
+  const flankPairs = [
+    [[-1, 0], [1, 0]],
+    [[0, -1], [0, 1]],
+    [[-1, -1], [1, 1]],
+    [[-1, 1], [1, -1]]
+  ];
+
+  const getAlpha = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) {
+      return 0;
+    }
+    const index = (y * width + x) * 4 + 3;
+    return data[index];
+  };
+
+  const isSurroundedByAlpha = (x, y) => {
+    let neighborCount = 0;
+    for (let i = 0; i < neighborOffsets.length; i += 1) {
+      const [dx, dy] = neighborOffsets[i];
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx === x && ny === y) {
+        continue;
+      }
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+        return false;
+      }
+      neighborCount += 1;
+      if (getAlpha(nx, ny) === 0) {
+        return false;
+      }
+    }
+    return neighborCount > 0;
+  };
+
+  const isFlankedByAlpha = (x, y) => {
+    for (let i = 0; i < flankPairs.length; i += 1) {
+      const [a, b] = flankPairs[i];
+      const ax = x + a[0];
+      const ay = y + a[1];
+      const bx = x + b[0];
+      const by = y + b[1];
+      if (ax < 0 || ay < 0 || ax >= width || ay >= height) {
+        continue;
+      }
+      if (bx < 0 || by < 0 || bx >= width || by >= height) {
+        continue;
+      }
+      if (getAlpha(ax, ay) > 0 && getAlpha(bx, by) > 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const findNearestAlpha = (startX, startY) => {
+    const queue = [];
+    const visited = new Uint8Array(width * height);
+    const clampX = Math.min(Math.max(startX, 0), width - 1);
+    const clampY = Math.min(Math.max(startY, 0), height - 1);
+    queue.push({ x: clampX, y: clampY });
+    visited[clampY * width + clampX] = 1;
+    let head = 0;
+    const directions = [
+      [-1, 0], [1, 0], [0, -1], [0, 1],
+      [-1, -1], [-1, 1], [1, -1], [1, 1]
+    ];
+
+    while (head < queue.length) {
+      const current = queue[head];
+      head += 1;
+      const alpha = getAlpha(current.x, current.y);
+      if (alpha > 0) {
+        return { x: current.x, y: current.y };
+      }
+      for (let i = 0; i < directions.length; i += 1) {
+        const [dx, dy] = directions[i];
+        const nx = current.x + dx;
+        const ny = current.y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+          continue;
+        }
+        const idx = ny * width + nx;
+        if (visited[idx]) {
+          continue;
+        }
+        visited[idx] = 1;
+        queue.push({ x: nx, y: ny });
+      }
+    }
+    return null;
+  };
+
+  for (let i = 0; i < adjusted.length; i += 1) {
+    const point = adjusted[i];
+    const pixelX = Math.round(point.x);
+    const pixelY = Math.round(point.y);
+    const alpha = getAlpha(pixelX, pixelY);
+    if (alpha > 0) {
+      continue;
+    }
+    if (isSurroundedByAlpha(pixelX, pixelY)) {
+      continue;
+    }
+    if (isFlankedByAlpha(pixelX, pixelY)) {
+      continue;
+    }
+    const nearest = findNearestAlpha(pixelX, pixelY);
+    if (!nearest) {
+      return { polygon: [], movedVertices: [], autoAdjusted: false, discard: true };
+    }
+    point.x = nearest.x;
+    point.y = nearest.y;
+    moved.add(i);
+  }
+
+  const movedVertices = Array.from(moved).sort((a, b) => a - b);
+  return { polygon: adjusted, movedVertices, autoAdjusted: movedVertices.length > 0, discard: false };
+}
+
 function setCurrentImage(index) {
   if (index < 0 || index >= state.images.length) {
     return;
@@ -874,9 +1048,11 @@ function loadCurrentImage() {
     return;
   }
   const annotation = getCurrentAnnotation();
+  state.imageAlphaData = null;
   const img = new Image();
   img.onload = () => {
     state.imageElement = img;
+    state.imageAlphaData = extractAlphaDataFromImage(img);
     annotation.width = img.naturalWidth;
     annotation.height = img.naturalHeight;
     resizeCanvasToContainer();
@@ -1111,6 +1287,11 @@ function handleWheel(event) {
 }
 
 function handleDoubleClick(event) {
+  if (state.drawingDraft) {
+    event.preventDefault();
+    finalizeDraftPolygon();
+    return;
+  }
   const annotation = getCurrentAnnotation();
   if (!annotation || !state.selectedObjectId) return;
   const object = getObjectById(state.selectedObjectId);
@@ -1250,12 +1431,32 @@ async function saveAnnotations() {
       throw new Error((txtResult.error || 'Error al guardar etiquetas YOLO') + detail);
     }
     state.dirtyImages.clear();
+    const cleared = clearPendingAutoAdjustedVertices();
+    if (cleared) {
+      redrawCanvas();
+    }
     showToast('Guardado completado.', 'success');
   } catch (error) {
     showToast(`Error al guardar: ${error.message}`, 'error');
   } finally {
     state.saveInProgress = false;
   }
+}
+
+function clearPendingAutoAdjustedVertices() {
+  let changed = false;
+  Object.values(state.annotations).forEach(annotation => {
+    if (!annotation || !Array.isArray(annotation.objects)) {
+      return;
+    }
+    annotation.objects.forEach(object => {
+      if (object?.meta?.autoAdjustedPending) {
+        object.meta.autoAdjustedPending = false;
+        changed = true;
+      }
+    });
+  });
+  return changed;
 }
 
 function startDraft(point) {
@@ -1289,8 +1490,23 @@ function finalizeDraftPolygon() {
     meta: {},
     enabled: true
   };
+  const adjustResult = adjustPolygonToAlpha(object.polygon, state.imageAlphaData);
+  if (adjustResult.discard) {
+    showToast('Zona marcada inválida (alpha=0 sin borde válido)', 'warning');
+    redrawCanvas();
+    return;
+  }
+  if (adjustResult.autoAdjusted) {
+    object.polygon = adjustResult.polygon;
+    object.meta.autoAdjusted = true;
+    object.meta.autoAdjustedPending = true;
+    object.meta.adjustedVertices = adjustResult.movedVertices.slice();
+  }
   updateDerivedData(annotation, object);
   annotation.objects.push(object);
+  if (adjustResult.autoAdjusted) {
+    showToast('Polígono ajustado al borde visible (alpha)', 'info');
+  }
   selectObject(object.id, null);
   markImageDirty(annotation.file_name);
   updateZonesList();
@@ -1434,6 +1650,14 @@ function updateDerivedData(annotation, object) {
   object.bbox = bbox;
   const validation = validatePolygon(annotation, object);
   validation.warnings = Array.isArray(validation.warnings) ? validation.warnings : [];
+  if (object.meta?.autoAdjusted && Array.isArray(object.meta.adjustedVertices)) {
+    object.meta.adjustedVertices.forEach(index => {
+      const message = `Vértice ${index + 1} ajustado al borde visible (alpha).`;
+      if (!validation.warnings.includes(message)) {
+        validation.warnings.push(message);
+      }
+    });
+  }
   if (object.meta?.orientationDefaulted) {
     const message = `Orientación por defecto aplicada (${getOrientationLabel(ORIENT_DEFAULT_ID)}).`;
     if (!validation.warnings.includes(message)) {
@@ -1639,16 +1863,24 @@ function drawPolygon(object) {
 
 function drawPolygonHandles(object) {
   const radius = HANDLE_CANVAS_PX;
+  const highlightPending = object.meta?.autoAdjustedPending;
+  const adjustedVerticesSet = highlightPending && Array.isArray(object.meta?.adjustedVertices)
+    ? new Set(object.meta.adjustedVertices)
+    : null;
   object.polygon.forEach((point, index) => {
     const { x, y } = imagePointToCanvas(point);
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, 2 * Math.PI);
-    ctx.fillStyle = 'white';
+    const isAdjusted = adjustedVerticesSet ? adjustedVerticesSet.has(index) : false;
+    ctx.fillStyle = isAdjusted ? '#ff7043' : 'white';
     ctx.fill();
     ctx.lineWidth = 2;
-    ctx.strokeStyle = object.id === state.selectedObjectId && state.selectedVertexIndex === index
-      ? '#ff9800'
-      : '#333';
+    const isSelected = object.id === state.selectedObjectId && state.selectedVertexIndex === index;
+    if (isSelected) {
+      ctx.strokeStyle = '#ff9800';
+    } else {
+      ctx.strokeStyle = isAdjusted ? '#ff7043' : '#333';
+    }
     ctx.stroke();
   });
   const centroid = getPolygonCentroid(object.polygon);
