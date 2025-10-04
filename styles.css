@@ -120,6 +120,12 @@ header h1 {
     cursor: crosshair;
     max-width: none;
     max-height: none;
+    /* Mantener píxeles nítidos en la mayoría de navegadores modernos (Chromium/WebKit). */
+    image-rendering: pixelated;
+    /* Fallback adicional para Firefox y motores antiguos que honran crisp-edges. */
+    image-rendering: crisp-edges;
+    /* Fondo completamente transparente para respetar el canal alpha en exportaciones. */
+    background: transparent;
 }
 
 .no-images {

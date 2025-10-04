@@ -114,8 +114,421 @@ const state = {
   orientationIssues: { missing: 0 }
 };
 
-const canvas = document.getElementById('imageCanvas');
-const ctx = canvas.getContext('2d');
+/**
+ * Configura un contexto 2D para renderizar pixel-art sin interpolación en la mayor
+ * cantidad de navegadores posibles. Los prefijos se mantienen por compatibilidad con
+ * motores antiguos de Chromium, Gecko y Edge Legacy.
+ *
+ * @param {CanvasRenderingContext2D} context - Contexto 2D de canvas a configurar.
+ * @returns {CanvasRenderingContext2D} El mismo contexto recibido para permitir chaining.
+ * @throws {TypeError} Si el parámetro recibido no es un contexto válido.
+ */
+function applyPixelPerfectConfig(context) {
+  if (!context || typeof context !== 'object') {
+    throw new TypeError('applyPixelPerfectConfig requiere un contexto 2D válido.');
+  }
+
+  // Vendor prefixes necesarios para navegadores antiguos: webkit (Chrome < 41), moz
+  // (Firefox ESR), ms (Edge Legacy) y la propiedad estándar.
+  const smoothingFlags = [
+    'imageSmoothingEnabled',
+    'webkitImageSmoothingEnabled',
+    'mozImageSmoothingEnabled',
+    'msImageSmoothingEnabled'
+  ];
+
+  smoothingFlags.forEach(flag => {
+    if (flag in context) {
+      try {
+        context[flag] = false;
+      } catch (error) {
+        console.warn(`No se pudo desactivar ${flag} en el contexto de canvas.`, error);
+      }
+    }
+  });
+
+  return context;
+}
+
+/**
+ * Crea un canvas auxiliar para operaciones intermedias como herramientas, overlays o
+ * sampling de alpha. Se aconseja liberar manualmente sus dimensiones una vez utilizado
+ * para facilitar la recolección de memoria.
+ *
+ * @param {number} width - Ancho deseado del canvas auxiliar.
+ * @param {number} height - Alto deseado del canvas auxiliar.
+ * @param {{ willReadFrequently?: boolean }} [options] - Atributos opcionales del contexto.
+ * @returns {{ canvas: HTMLCanvasElement, context: CanvasRenderingContext2D }|null} Canvas y
+ *   contexto configurados, o null si la creación falla.
+ */
+function createAuxiliaryContext(width, height, options = {}) {
+  const safeWidth = Number.isFinite(width) && width > 0 ? Math.floor(width) : 0;
+  const safeHeight = Number.isFinite(height) && height > 0 ? Math.floor(height) : 0;
+
+  if (!safeWidth || !safeHeight) {
+    console.error('createAuxiliaryContext requiere dimensiones positivas.');
+    return null;
+  }
+
+  const offscreen = document.createElement('canvas');
+  offscreen.width = safeWidth;
+  offscreen.height = safeHeight;
+
+  let context = null;
+  try {
+    context = offscreen.getContext('2d', {
+      alpha: true,
+      willReadFrequently: Boolean(options.willReadFrequently)
+    });
+  } catch (error) {
+    console.error('No se pudo crear el contexto auxiliar 2D.', error);
+    return null;
+  }
+
+  if (!context) {
+    console.error('El navegador no retornó un contexto 2D auxiliar.');
+    return null;
+  }
+
+  try {
+    applyPixelPerfectConfig(context);
+  } catch (error) {
+    console.warn('No se pudo aplicar la configuración pixel-perfect al contexto auxiliar.', error);
+  }
+
+  return { canvas: offscreen, context };
+}
+
+/**
+ * Administra un canvas 2D asegurando renderizados pixel-perfect, validaciones de zoom y
+ * operaciones resilientes ante errores de dibujo.
+ */
+class PixelPerfectRenderer {
+  /**
+   * @param {HTMLCanvasElement|null} canvasElement - Canvas objetivo del renderer.
+   * @param {{ maxZoom?: number, minZoom?: number, contextAttributes?: CanvasRenderingContext2DSettings }} [options]
+   *   Configuración avanzada para límites de zoom y atributos del contexto.
+   * @throws {TypeError} Si el canvas no es válido.
+   * @throws {Error} Si no fue posible obtener un contexto 2D compatible.
+   */
+  constructor(canvasElement, options = {}) {
+    if (!(canvasElement instanceof HTMLCanvasElement)) {
+      throw new TypeError('PixelPerfectRenderer requiere un elemento <canvas> válido.');
+    }
+
+    this.canvas = canvasElement;
+    this.maxZoom = Number.isFinite(options.maxZoom) && options.maxZoom > 0 ? options.maxZoom : 128;
+    this.minZoom = Number.isFinite(options.minZoom) && options.minZoom > 0 ? options.minZoom : 1 / this.maxZoom;
+    this.#context = this.#createContext(options.contextAttributes);
+
+    // Forzamos la configuración pixel-perfect desde el inicio para evitar flickering.
+    this.ensurePixelPerfectConfig();
+  }
+
+  /** @type {CanvasRenderingContext2D|null} */
+  #context = null;
+
+  /**
+   * Crea el contexto 2D asegurando transparencia alpha y lecturas frecuentes seguras.
+   *
+   * @param {CanvasRenderingContext2DSettings} [attributes] - Atributos personalizados.
+   * @returns {CanvasRenderingContext2D} Contexto creado.
+   * @private
+   */
+  #createContext(attributes = {}) {
+    const config = {
+      alpha: true,
+      willReadFrequently: true,
+      ...attributes
+    };
+
+    let context = null;
+    try {
+      context = this.canvas.getContext('2d', config);
+    } catch (error) {
+      console.error('No se pudo crear el contexto 2D del canvas principal.', error);
+      throw new Error('Contexto 2D no disponible para PixelPerfectRenderer.');
+    }
+
+    if (!context) {
+      throw new Error('El navegador devolvió un contexto 2D nulo.');
+    }
+
+    return context;
+  }
+
+  /**
+   * Retorna el contexto 2D administrado.
+   *
+   * @returns {CanvasRenderingContext2D} Contexto activo.
+   */
+  getContext() {
+    if (!this.#context) {
+      throw new Error('El contexto 2D no está inicializado.');
+    }
+    return this.#context;
+  }
+
+  /**
+   * Reaplica la configuración pixel-perfect al contexto administrado.
+   */
+  ensurePixelPerfectConfig() {
+    try {
+      applyPixelPerfectConfig(this.getContext());
+    } catch (error) {
+      console.error('No fue posible aplicar la configuración pixel-perfect al canvas principal.', error);
+    }
+  }
+
+  /**
+   * Borra todo el canvas de forma segura manteniendo la transparencia.
+   */
+  clearCanvas() {
+    const context = this.getContext();
+    try {
+      context.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    } catch (error) {
+      console.error('No se pudo limpiar el canvas principal.', error);
+    }
+  }
+
+  /**
+   * Calcula las dimensiones finales de un renderizado según zoom y escala externa.
+   *
+   * @param {number} baseWidth - Ancho original de la textura.
+   * @param {number} baseHeight - Alto original de la textura.
+   * @param {number} zoom - Factor de zoom aplicado por el usuario.
+   * @param {number} scale - Factor de escala adicional (fit-to-screen, DPI, etc.).
+   * @returns {{ baseWidth: number, baseHeight: number, zoomedWidth: number, zoomedHeight: number, drawWidth: number, drawHeight: number }}
+   */
+  calculateDrawMetrics(baseWidth, baseHeight, zoom, scale) {
+    const safeBaseWidth = Number.isFinite(baseWidth) && baseWidth > 0 ? baseWidth : 1;
+    const safeBaseHeight = Number.isFinite(baseHeight) && baseHeight > 0 ? baseHeight : 1;
+    const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+    let safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+
+    if (safeZoom > this.maxZoom) {
+      console.warn(`Zoom ${safeZoom} excede el máximo permitido (${this.maxZoom}). Se limitará.`);
+      safeZoom = this.maxZoom;
+    } else if (safeZoom < this.minZoom) {
+      console.warn(`Zoom ${safeZoom} es inferior al mínimo permitido (${this.minZoom}). Se ajustará.`);
+      safeZoom = this.minZoom;
+    }
+
+    const zoomedWidth = safeBaseWidth * safeZoom;
+    const zoomedHeight = safeBaseHeight * safeZoom;
+
+    return {
+      baseWidth: safeBaseWidth,
+      baseHeight: safeBaseHeight,
+      zoomedWidth,
+      zoomedHeight,
+      drawWidth: zoomedWidth * safeScale,
+      drawHeight: zoomedHeight * safeScale
+    };
+  }
+
+  /**
+   * Dibuja una textura preservando los píxeles. Si la operación falla se recurre a un
+   * patrón de fallback para evitar dejar artefactos en pantalla.
+   *
+   * @param {HTMLImageElement|HTMLCanvasElement} texture - Fuente a dibujar.
+   * @param {{
+   *   sourceWidth?: number,
+   *   sourceHeight?: number,
+   *   destX?: number,
+   *   destY?: number,
+   *   destWidth?: number,
+   *   destHeight?: number
+   * }} [options] - Opciones de renderizado.
+   */
+  drawTexture(texture, options = {}) {
+    if (!texture) {
+      console.error('drawTexture recibió una textura inválida.');
+      return;
+    }
+
+    const context = this.getContext();
+    this.ensurePixelPerfectConfig();
+
+    const sourceWidth = Number.isFinite(options.sourceWidth) && options.sourceWidth > 0
+      ? options.sourceWidth
+      : texture.naturalWidth || texture.width || 0;
+    const sourceHeight = Number.isFinite(options.sourceHeight) && options.sourceHeight > 0
+      ? options.sourceHeight
+      : texture.naturalHeight || texture.height || 0;
+    const destX = Number.isFinite(options.destX) ? options.destX : 0;
+    const destY = Number.isFinite(options.destY) ? options.destY : 0;
+    const destWidth = Number.isFinite(options.destWidth) && options.destWidth > 0
+      ? options.destWidth
+      : sourceWidth;
+    const destHeight = Number.isFinite(options.destHeight) && options.destHeight > 0
+      ? options.destHeight
+      : sourceHeight;
+
+    if (!sourceWidth || !sourceHeight || !destWidth || !destHeight) {
+      console.error('drawTexture requiere dimensiones positivas para dibujar.');
+      return;
+    }
+
+    try {
+      context.drawImage(
+        texture,
+        0,
+        0,
+        sourceWidth,
+        sourceHeight,
+        destX,
+        destY,
+        destWidth,
+        destHeight
+      );
+    } catch (error) {
+      console.error('drawTexture falló al dibujar la textura. Se usará un patrón de fallback.', error);
+      this.#drawFallback(destX, destY, destWidth, destHeight);
+    }
+  }
+
+  /**
+   * Exporta el canvas actual a PNG conservando el canal alpha.
+   *
+   * @returns {string|null} DataURL en formato PNG o null si ocurre un error.
+   */
+  exportToPng() {
+    try {
+      this.ensurePixelPerfectConfig();
+      return this.canvas.toDataURL('image/png');
+    } catch (error) {
+      console.error('No se pudo exportar la textura a PNG.', error);
+      return null;
+    }
+  }
+
+  /**
+   * Crea un contexto auxiliar reutilizando la helper global para mantener consistencia.
+   *
+   * @param {number} width - Ancho del canvas auxiliar.
+   * @param {number} height - Alto del canvas auxiliar.
+   * @param {{ willReadFrequently?: boolean }} [options] - Opciones adicionales.
+   * @returns {{ canvas: HTMLCanvasElement, context: CanvasRenderingContext2D }|null}
+   */
+  createAuxiliaryContext(width, height, options = {}) {
+    return createAuxiliaryContext(width, height, options);
+  }
+
+  /**
+   * Dibuja un patrón visual indicando que la textura no pudo renderizarse.
+   *
+   * @param {number} x - Posición X de destino.
+   * @param {number} y - Posición Y de destino.
+   * @param {number} width - Ancho del área afectada.
+   * @param {number} height - Alto del área afectada.
+   * @private
+   */
+  #drawFallback(x, y, width, height) {
+    const context = this.getContext();
+    const patternSize = 8;
+    context.save();
+    context.fillStyle = 'rgba(255, 0, 0, 0.35)';
+    context.fillRect(x, y, width, height);
+    context.fillStyle = 'rgba(255, 255, 255, 0.4)';
+    for (let row = 0; row < height; row += patternSize) {
+      for (let col = 0; col < width; col += patternSize) {
+        if (((row + col) / patternSize) % 2 === 0) {
+          context.fillRect(x + col, y + row, patternSize, patternSize);
+        }
+      }
+    }
+    context.restore();
+  }
+}
+
+let canvas = document.getElementById('imageCanvas');
+let ctx = null;
+let pixelRenderer = null;
+
+try {
+  if (canvas) {
+    pixelRenderer = new PixelPerfectRenderer(canvas);
+    ctx = pixelRenderer.getContext();
+  } else {
+    console.error('No se encontró el canvas #imageCanvas en el DOM.');
+  }
+} catch (error) {
+  console.error('Falló la inicialización del PixelPerfectRenderer. Se intentará un contexto de reserva.', error);
+  try {
+    ctx = canvas?.getContext?.('2d', { alpha: true }) || null;
+    if (ctx) {
+      applyPixelPerfectConfig(ctx);
+    }
+  } catch (fallbackError) {
+    console.error('Tampoco se pudo crear un contexto de reserva.', fallbackError);
+  }
+}
+
+/**
+ * Obtiene las dimensiones originales de la textura actual considerando anotaciones y
+ * datos EXIF. Si no hay textura disponible se recurre a las dimensiones del canvas para
+ * mantener la lógica de zoom consistente.
+ *
+ * @returns {{ width: number, height: number }} Dimensiones base garantizando valores > 0.
+ */
+function getBaseImageDimensions() {
+  const annotation = getCurrentAnnotation();
+  const image = state.imageElement;
+
+  const fallbackWidth = canvas?.width || 1;
+  const fallbackHeight = canvas?.height || 1;
+
+  const width = Math.max(
+    1,
+    Number(annotation?.width) || image?.naturalWidth || fallbackWidth
+  );
+  const height = Math.max(
+    1,
+    Number(annotation?.height) || image?.naturalHeight || fallbackHeight
+  );
+
+  if (!image) {
+    console.warn('No hay textura cargada; se usarán dimensiones de fallback.');
+  }
+
+  return { width, height };
+}
+
+/**
+ * Calcula las dimensiones finales a dibujar en pantalla considerando zoom del usuario y
+ * escala automática. Se apoya en PixelPerfectRenderer para validar los límites.
+ *
+ * @returns {{ baseWidth: number, baseHeight: number, zoomedWidth: number, zoomedHeight: number, drawWidth: number, drawHeight: number }}
+ */
+function getZoomedDrawDimensions() {
+  const { width, height } = getBaseImageDimensions();
+  if (!pixelRenderer) {
+    return {
+      baseWidth: width,
+      baseHeight: height,
+      zoomedWidth: width * state.zoom,
+      zoomedHeight: height * state.zoom,
+      drawWidth: width * state.zoom * state.scale,
+      drawHeight: height * state.zoom * state.scale
+    };
+  }
+
+  try {
+    return pixelRenderer.calculateDrawMetrics(width, height, state.zoom, state.scale);
+  } catch (error) {
+    console.error('Error al calcular dimensiones de renderizado. Se usarán valores por defecto.', error);
+    return {
+      baseWidth: width,
+      baseHeight: height,
+      zoomedWidth: width,
+      zoomedHeight: height,
+      drawWidth: width,
+      drawHeight: height
+    };
+  }
+}
 const zoneSelect = document.getElementById('zoneSelect');
 const imageList = document.getElementById('imageList');
 const zonesList = document.getElementById('zonesList');
@@ -371,6 +784,7 @@ function setupEventListeners() {
   document.addEventListener('keydown', handleKeyDown);
   window.addEventListener('resize', () => {
     if (state.currentImageIndex >= 0) {
+      resizeCanvasToContainer();
       fitImageToCanvas();
       redrawCanvas();
     }
@@ -832,36 +1246,56 @@ function bboxToPolygon(bbox) {
   ];
 }
 
+/**
+ * Extrae los datos de alpha de una imagen utilizando un canvas auxiliar. Se usa en
+ * herramientas de validación para detectar transparencias.
+ *
+ * @param {HTMLImageElement} image - Imagen de origen previamente cargada.
+ * @returns {{ width: number, height: number, data: Uint8ClampedArray, hasAlpha: boolean }|null}
+ */
 function extractAlphaDataFromImage(image) {
-  const width = image?.naturalWidth || 0;
-  const height = image?.naturalHeight || 0;
+  if (!image) {
+    console.warn('extractAlphaDataFromImage recibió una imagen nula.');
+    return null;
+  }
+
+  const width = image?.naturalWidth || image?.width || 0;
+  const height = image?.naturalHeight || image?.height || 0;
   if (!width || !height) {
+    console.warn('La imagen no contiene dimensiones válidas para extraer alpha.');
     return null;
   }
-  const offscreen = document.createElement('canvas');
-  offscreen.width = width;
-  offscreen.height = height;
-  const context = offscreen.getContext('2d');
-  if (!context) {
+
+  const aux = pixelRenderer?.createAuxiliaryContext(width, height, { willReadFrequently: true })
+    || createAuxiliaryContext(width, height, { willReadFrequently: true });
+
+  if (!aux) {
     return null;
   }
-  context.drawImage(image, 0, 0, width, height);
-  let imageData;
+
+  const { canvas: offscreen, context } = aux;
+
   try {
-    imageData = context.getImageData(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+    const imageData = context.getImageData(0, 0, width, height);
+    const { data } = imageData;
+    let hasAlpha = false;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) {
+        hasAlpha = true;
+        break;
+      }
+    }
+    // Liberamos memoria reduciendo el tamaño del canvas auxiliar.
+    offscreen.width = 0;
+    offscreen.height = 0;
+    return { width: imageData.width, height: imageData.height, data, hasAlpha };
   } catch (error) {
     console.warn('No se pudo extraer datos de alpha de la imagen:', error);
+    offscreen.width = 0;
+    offscreen.height = 0;
     return null;
   }
-  const { data } = imageData;
-  let hasAlpha = false;
-  for (let i = 3; i < data.length; i += 4) {
-    if (data[i] < 255) {
-      hasAlpha = true;
-      break;
-    }
-  }
-  return { width: imageData.width, height: imageData.height, data, hasAlpha };
 }
 
 function adjustPolygonToAlpha(polygon, alphaData) {
@@ -1068,30 +1502,61 @@ function loadCurrentImage() {
   img.src = image.dataUrl;
 }
 
+/**
+ * Ajusta el tamaño del canvas al contenedor disponible, preservando la configuración de
+ * pixel-art y evitando valores mínimos que generarían divisiones por cero.
+ */
 function resizeCanvasToContainer() {
+  if (!canvas) {
+    console.error('resizeCanvasToContainer no pudo ejecutarse: canvas inexistente.');
+    return;
+  }
+
   const container = canvas.parentElement;
+  if (!container) {
+    console.error('resizeCanvasToContainer requiere un contenedor para calcular el tamaño.');
+    return;
+  }
+
   const rect = container.getBoundingClientRect();
-  const width = Math.max(rect.width, 100);
-  const height = Math.max(rect.height, 100);
+  const width = Math.max(rect.width || 0, 100);
+  const height = Math.max(rect.height || 0, 100);
+
   canvas.width = width;
   canvas.height = height;
   state.canvasRect = { left: rect.left, top: rect.top, width, height };
+
+  pixelRenderer?.ensurePixelPerfectConfig();
 }
 
+/**
+ * Reescala la textura actual para que encaje en el canvas respetando su relación de
+ * aspecto. Reinicia el zoom del usuario para evitar saltos bruscos.
+ */
 function fitImageToCanvas() {
-  if (!state.imageElement) return;
+  if (!canvas) {
+    console.error('fitImageToCanvas no puede ejecutarse sin canvas.');
+    return;
+  }
+  if (!state.imageElement) {
+    console.warn('fitImageToCanvas llamado sin imagen cargada.');
+    return;
+  }
   const annotation = getCurrentAnnotation();
-  if (!annotation) return;
-  const imgWidth = annotation.width || state.imageElement.naturalWidth || canvas.width;
-  const imgHeight = annotation.height || state.imageElement.naturalHeight || canvas.height;
+  if (!annotation) {
+    console.warn('fitImageToCanvas requiere una anotación activa.');
+    return;
+  }
+
+  const imgWidth = Math.max(1, annotation.width || state.imageElement.naturalWidth || canvas.width);
+  const imgHeight = Math.max(1, annotation.height || state.imageElement.naturalHeight || canvas.height);
   const scaleX = canvas.width / imgWidth;
   const scaleY = canvas.height / imgHeight;
-  state.scale = Math.min(scaleX, scaleY);
+  state.scale = Math.max(0.01, Math.min(scaleX, scaleY));
   state.zoom = 1;
-  const drawnWidth = imgWidth * state.scale * state.zoom;
-  const drawnHeight = imgHeight * state.scale * state.zoom;
-  state.panX = (canvas.width - drawnWidth) / 2;
-  state.panY = (canvas.height - drawnHeight) / 2;
+  const { drawWidth, drawHeight } = getZoomedDrawDimensions();
+  state.panX = (canvas.width - drawWidth) / 2;
+  state.panY = (canvas.height - drawHeight) / 2;
 }
 
 function updateImageInfo() {
@@ -1810,25 +2275,98 @@ function getPolygonCentroid(polygon) {
   return { x: x / polygon.length, y: y / polygon.length };
 }
 
+/**
+ * Redibuja la escena completa (textura base, objetos, overlays) aplicando salvaguardas
+ * ante posibles fallos de renderizado de canvas.
+ */
 function redrawCanvas() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (!state.imageElement) return;
+  if (!canvas || !ctx) {
+    console.error('redrawCanvas no puede ejecutarse: contexto o canvas ausente.');
+    return;
+  }
+
+  if (pixelRenderer) {
+    pixelRenderer.ensurePixelPerfectConfig();
+    pixelRenderer.clearCanvas();
+  } else {
+    try {
+      applyPixelPerfectConfig(ctx);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    } catch (error) {
+      console.error('No se pudo limpiar el canvas con el fallback de contexto.', error);
+    }
+  }
+
+  if (!state.imageElement) {
+    return;
+  }
+
   ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.drawImage(
-    state.imageElement,
-    state.panX,
-    state.panY,
-    state.imageElement.naturalWidth * state.scale * state.zoom,
-    state.imageElement.naturalHeight * state.scale * state.zoom
-  );
+  try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  } catch (error) {
+    console.error('No se pudo restablecer la transformación del canvas.', error);
+  }
+
+  const { baseWidth, baseHeight, drawWidth, drawHeight } = getZoomedDrawDimensions();
+  const destX = Math.round(state.panX);
+  const destY = Math.round(state.panY);
+  const destWidth = Math.round(drawWidth);
+  const destHeight = Math.round(drawHeight);
+
+  if (pixelRenderer) {
+    pixelRenderer.drawTexture(state.imageElement, {
+      sourceWidth: baseWidth,
+      sourceHeight: baseHeight,
+      destX,
+      destY,
+      destWidth,
+      destHeight
+    });
+  } else {
+    try {
+      ctx.drawImage(
+        state.imageElement,
+        0,
+        0,
+        baseWidth,
+        baseHeight,
+        destX,
+        destY,
+        destWidth,
+        destHeight
+      );
+    } catch (error) {
+      console.error('drawImage falló en el renderer de fallback.', error);
+    }
+  }
+
   ctx.restore();
-  drawObjects();
-  drawDraft();
-  drawOverlay();
+
+  try {
+    drawObjects();
+  } catch (error) {
+    console.error('drawObjects falló durante el renderizado.', error);
+  }
+
+  try {
+    drawDraft();
+  } catch (error) {
+    console.error('drawDraft falló durante el renderizado.', error);
+  }
+
+  try {
+    drawOverlay();
+  } catch (error) {
+    console.error('drawOverlay falló durante el renderizado.', error);
+  }
 }
 
 function drawObjects() {
+  if (!ctx) {
+    console.error('drawObjects no puede ejecutarse sin contexto 2D.');
+    return;
+  }
   const annotation = getCurrentAnnotation();
   if (!annotation) return;
   annotation.objects.forEach(object => {
@@ -1912,6 +2450,10 @@ function drawPolygonLabel(object) {
 }
 
 function drawDraft() {
+  if (!ctx) {
+    console.error('drawDraft no puede ejecutarse sin contexto 2D.');
+    return;
+  }
   if (!state.drawingDraft || state.drawingDraft.points.length === 0) return;
   ctx.save();
   ctx.strokeStyle = '#1976d2';
@@ -1942,6 +2484,10 @@ function drawDraft() {
 }
 
 function drawOverlay() {
+  if (!ctx) {
+    console.error('drawOverlay no puede ejecutarse sin contexto 2D.');
+    return;
+  }
   const annotation = getCurrentAnnotation();
   if (!annotation) return;
   const zoomPercent = Math.round(state.scale * state.zoom * 100);
@@ -1955,6 +2501,35 @@ function drawOverlay() {
   ctx.fillText(`Zoom: ${zoomPercent}%`, 20, 30);
   ctx.fillText(`Objetos: ${validObjects}/${totalObjects}`, 20, 50);
   ctx.restore();
+}
+
+/**
+ * Exporta la textura visible a PNG preservando alpha. Si el entorno no soporta la
+ * configuración avanzada intenta un fallback básico.
+ *
+ * @returns {string|null} Cadena base64 de la textura o null si la exportación falla.
+ */
+function getCurrentTexturePngDataUrl() {
+  if (!canvas) {
+    console.error('No es posible exportar la textura: canvas ausente.');
+    return null;
+  }
+
+  if (pixelRenderer) {
+    return pixelRenderer.exportToPng();
+  }
+
+  try {
+    applyPixelPerfectConfig(ctx);
+    return canvas.toDataURL('image/png');
+  } catch (error) {
+    console.error('Falló la exportación PNG desde el contexto de reserva.', error);
+    return null;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.getCurrentTexturePngDataUrl = getCurrentTexturePngDataUrl;
 }
 
 function updateZonesList() {
