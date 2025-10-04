@@ -15,6 +15,53 @@ const ORIENTATIONS = [
 const ORIENTATION_COUNT = ORIENTATIONS.length;
 const ORIENT_DEFAULT_ID = 0;
 
+const ORIENTATION_CLASSES = ['body', 'extremities', 'armor', 'head'];
+const ORIENTATION_CLASS_SET = new Set(ORIENTATION_CLASSES);
+
+const NON_ORIENTATION_CLASSES = [
+  'eyes',
+  'mouth',
+  'heart',
+  'cracks',
+  'cristal',
+  'flower',
+  'zombie_zone',
+  'sky',
+  'stars',
+  'wings',
+  'claws',
+  'aletas',
+  'fangs'
+];
+
+function classSupportsOrientation(className) {
+  return ORIENTATION_CLASS_SET.has(className);
+}
+
+function roundCoordinate(value, minecraftStyle) {
+  const numeric = Number(value) || 0;
+  if (minecraftStyle) {
+    return Math.round(numeric);
+  }
+  return Math.round(numeric * 100) / 100;
+}
+
+function clampProcessedCoordinate(value) {
+  return Math.max(0, Number.isFinite(value) ? value : 0);
+}
+
+function enforceOrientationForObject(object) {
+  if (!object) {
+    return;
+  }
+  if (!classSupportsOrientation(object.class_name)) {
+    object.class_orientation_id = ORIENT_DEFAULT_ID;
+    if (object.meta && object.meta.orientationDefaulted) {
+      delete object.meta.orientationDefaulted;
+    }
+  }
+}
+
 function createDefaultConfig() {
   const orientationFilter = {};
   ORIENTATIONS.forEach(orientation => {
@@ -72,6 +119,31 @@ function cloneData(data) {
   return JSON.parse(JSON.stringify(data));
 }
 
+function loadSessionPreferences() {
+  if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+    return;
+  }
+  try {
+    const stored = window.sessionStorage.getItem('minecraftStyleGlobalPreference');
+    if (stored === 'true' || stored === 'false') {
+      state.sessionMinecraftStyleGlobal = stored === 'true';
+    }
+  } catch (error) {
+    console.warn('No se pudo cargar la preferencia de Minecraft Style desde sessionStorage.', error);
+  }
+}
+
+function persistSessionPreferences() {
+  if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem('minecraftStyleGlobalPreference', state.sessionMinecraftStyleGlobal ? 'true' : 'false');
+  } catch (error) {
+    console.warn('No se pudo guardar la preferencia de Minecraft Style en sessionStorage.', error);
+  }
+}
+
 const state = {
   images: [],
   annotations: {},
@@ -112,7 +184,8 @@ const state = {
   configLoadError: false,
   orientationOptions: ORIENTATIONS,
   currentOrientationId: ORIENT_DEFAULT_ID,
-  orientationIssues: { missing: 0 }
+  orientationIssues: { missing: 0 },
+  sessionMinecraftStyleGlobal: false
 };
 
 /**
@@ -541,6 +614,7 @@ const imageNameLabel = document.getElementById('imageName');
 const imageIndexLabel = document.getElementById('imageIndex');
 const noImages = document.getElementById('noImages');
 const zonesPanel = document.querySelector('.zones-panel');
+const minecraftStyleGlobalToggle = document.getElementById('minecraftStyleGlobalToggle');
 
 let toastContainer;
 let bannerContainer;
@@ -555,10 +629,15 @@ let selectedObjectPanel;
 let objectOrientationSelect;
 let orientationIssuesBanner;
 let selectedObjectWarnings;
+let objectMinecraftStyleToggle;
+let objectMinecraftResetButton;
+let suppressObjectMinecraftStyleChange = false;
+let suppressGlobalMinecraftStyleChange = false;
 
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
+  loadSessionPreferences();
   setupAuxiliaryContainers();
   setupConfigPanel();
   setupEventListeners();
@@ -731,6 +810,11 @@ function setupConfigPanel() {
     if (!annotation || !state.selectedObjectId) return;
     const object = getObjectById(state.selectedObjectId);
     if (!object) return;
+    if (!classSupportsOrientation(object.class_name)) {
+      object.class_orientation_id = ORIENT_DEFAULT_ID;
+      renderSelectedObjectPanel();
+      return;
+    }
     const newId = Number(objectOrientationSelect.value);
     object.class_orientation_id = newId;
     if (object.meta) {
@@ -745,6 +829,21 @@ function setupConfigPanel() {
   selectedObjectPanel.appendChild(selectedTitle);
   selectedObjectPanel.appendChild(orientationLabel);
   selectedObjectPanel.appendChild(objectOrientationSelect);
+  const minecraftStyleRow = document.createElement('label');
+  minecraftStyleRow.textContent = 'Minecraft Style';
+  minecraftStyleRow.style.display = 'flex';
+  minecraftStyleRow.style.alignItems = 'center';
+  minecraftStyleRow.style.gap = '6px';
+  objectMinecraftStyleToggle = document.createElement('input');
+  objectMinecraftStyleToggle.type = 'checkbox';
+  objectMinecraftStyleToggle.addEventListener('change', handleObjectMinecraftStyleToggleChange);
+  minecraftStyleRow.prepend(objectMinecraftStyleToggle);
+  selectedObjectPanel.appendChild(minecraftStyleRow);
+  objectMinecraftResetButton = document.createElement('button');
+  objectMinecraftResetButton.type = 'button';
+  objectMinecraftResetButton.textContent = 'Usar global';
+  objectMinecraftResetButton.addEventListener('click', resetObjectMinecraftStyle);
+  selectedObjectPanel.appendChild(objectMinecraftResetButton);
   selectedObjectWarnings = document.createElement('div');
   selectedObjectWarnings.style.fontSize = '12px';
   selectedObjectWarnings.style.color = '#8a6d3b';
@@ -757,6 +856,10 @@ function setupEventListeners() {
     state.currentClassName = zoneSelect.value;
     redrawCanvas();
   });
+
+  if (minecraftStyleGlobalToggle) {
+    minecraftStyleGlobalToggle.addEventListener('change', handleGlobalMinecraftStyleToggle);
+  }
 
   layerSelect.addEventListener('change', () => {
     const annotation = getCurrentAnnotation();
@@ -790,6 +893,36 @@ function setupEventListeners() {
       redrawCanvas();
     }
   });
+}
+
+function handleGlobalMinecraftStyleToggle() {
+  if (suppressGlobalMinecraftStyleChange) {
+    return;
+  }
+  const annotation = getCurrentAnnotation();
+  if (!annotation || !minecraftStyleGlobalToggle) {
+    return;
+  }
+  annotation.minecraft_style_enabled = minecraftStyleGlobalToggle.checked;
+  state.sessionMinecraftStyleGlobal = annotation.minecraft_style_enabled;
+  persistSessionPreferences();
+  markImageDirty(annotation.file_name);
+  updateZonesList();
+  renderSelectedObjectPanel();
+}
+
+function updateMinecraftStyleGlobalToggle(annotation) {
+  if (!minecraftStyleGlobalToggle) {
+    return;
+  }
+  const hasAnnotation = Boolean(annotation);
+  minecraftStyleGlobalToggle.disabled = !hasAnnotation;
+  const value = hasAnnotation
+    ? Boolean(annotation.minecraft_style_enabled)
+    : state.sessionMinecraftStyleGlobal;
+  suppressGlobalMinecraftStyleChange = true;
+  minecraftStyleGlobalToggle.checked = value;
+  suppressGlobalMinecraftStyleChange = false;
 }
 
 async function loadClasses() {
@@ -1051,16 +1184,222 @@ function renderSelectedObjectPanel() {
     return;
   }
   selectedObjectPanel.style.display = 'flex';
+  const annotation = getCurrentAnnotation();
   const orientationId = Number.isInteger(object.class_orientation_id)
     ? object.class_orientation_id
     : ORIENT_DEFAULT_ID;
+  const orientable = classSupportsOrientation(object.class_name);
   if (objectOrientationSelect) {
     objectOrientationSelect.value = String(orientationId);
+    objectOrientationSelect.disabled = !orientable;
+  }
+  if (objectMinecraftStyleToggle) {
+    const override = Object.prototype.hasOwnProperty.call(object, 'minecraft_style')
+      ? object.minecraft_style
+      : null;
+    const globalMinecraft = annotation ? Boolean(annotation.minecraft_style_enabled) : state.sessionMinecraftStyleGlobal;
+    const effective = override === null || override === undefined ? globalMinecraft : Boolean(override);
+    suppressObjectMinecraftStyleChange = true;
+    objectMinecraftStyleToggle.checked = Boolean(effective);
+    objectMinecraftStyleToggle.indeterminate = override === null || override === undefined;
+    objectMinecraftStyleToggle.disabled = false;
+    suppressObjectMinecraftStyleChange = false;
+    if (objectMinecraftStyleToggle.indeterminate) {
+      objectMinecraftStyleToggle.title = 'Usando configuración global';
+    } else {
+      objectMinecraftStyleToggle.title = objectMinecraftStyleToggle.checked
+        ? 'Forzado a estilo Minecraft'
+        : 'Forzado a 2 decimales';
+    }
+  }
+  if (objectMinecraftResetButton) {
+    const overridePresent = object.minecraft_style !== null && object.minecraft_style !== undefined;
+    objectMinecraftResetButton.disabled = !overridePresent;
   }
   if (selectedObjectWarnings) {
     const warnings = object.validation?.warnings || [];
     selectedObjectWarnings.textContent = warnings.join(' · ');
   }
+}
+
+function handleObjectMinecraftStyleToggleChange() {
+  if (suppressObjectMinecraftStyleChange) {
+    return;
+  }
+  const annotation = getCurrentAnnotation();
+  const object = getObjectById(state.selectedObjectId);
+  if (!annotation || !object || !objectMinecraftStyleToggle) {
+    return;
+  }
+  object.minecraft_style = objectMinecraftStyleToggle.checked;
+  objectMinecraftStyleToggle.indeterminate = false;
+  markImageDirty(annotation.file_name);
+  updateZonesList();
+}
+
+function resetObjectMinecraftStyle() {
+  const annotation = getCurrentAnnotation();
+  const object = getObjectById(state.selectedObjectId);
+  if (!annotation || !object) {
+    return;
+  }
+  object.minecraft_style = null;
+  markImageDirty(annotation.file_name);
+  renderSelectedObjectPanel();
+  updateZonesList();
+}
+
+function getEffectiveMinecraftStyle(annotation, object) {
+  const globalMinecraft = Boolean(annotation?.minecraft_style_enabled);
+  if (!object || !Object.prototype.hasOwnProperty.call(object, 'minecraft_style')) {
+    return globalMinecraft;
+  }
+  if (object.minecraft_style === null || object.minecraft_style === undefined) {
+    return globalMinecraft;
+  }
+  return Boolean(object.minecraft_style);
+}
+
+function processPolygonPoints(polygon, minecraftStyle) {
+  if (!Array.isArray(polygon)) {
+    return [];
+  }
+  return polygon.map(point => ({
+    x: clampProcessedCoordinate(roundCoordinate(point.x, minecraftStyle)),
+    y: clampProcessedCoordinate(roundCoordinate(point.y, minecraftStyle))
+  }));
+}
+
+function sanitizeBoundingBoxForStyle(bbox, minecraftStyle) {
+  if (!bbox) {
+    return null;
+  }
+  return {
+    x: clampProcessedCoordinate(roundCoordinate(bbox.x, minecraftStyle)),
+    y: clampProcessedCoordinate(roundCoordinate(bbox.y, minecraftStyle)),
+    w: clampProcessedCoordinate(roundCoordinate(bbox.w, minecraftStyle)),
+    h: clampProcessedCoordinate(roundCoordinate(bbox.h, minecraftStyle))
+  };
+}
+
+function processObjectForExport(annotation, object) {
+  const clone = cloneData(object);
+  enforceOrientationForObject(clone);
+  if (!Object.prototype.hasOwnProperty.call(clone, 'minecraft_style')) {
+    clone.minecraft_style = null;
+  } else if (clone.minecraft_style !== null) {
+    clone.minecraft_style = Boolean(clone.minecraft_style);
+  }
+  const minecraftStyle = getEffectiveMinecraftStyle(annotation, clone);
+  const processedPolygon = processPolygonPoints(clone.polygon, minecraftStyle);
+  clone.polygon = processedPolygon;
+  let processedBBox = null;
+  if (processedPolygon.length > 0) {
+    processedBBox = computeBoundingBox(processedPolygon);
+  }
+  if (processedBBox) {
+    clone.bbox = sanitizeBoundingBoxForStyle(processedBBox, minecraftStyle);
+  } else if (clone.bbox) {
+    clone.bbox = sanitizeBoundingBoxForStyle(clone.bbox, minecraftStyle);
+  } else {
+    clone.bbox = null;
+  }
+  return clone;
+}
+
+function createProcessedAnnotation(annotation, options = {}) {
+  const includePredicate = typeof options.includePredicate === 'function'
+    ? options.includePredicate
+    : () => true;
+  const enabledValue = Object.prototype.hasOwnProperty.call(options, 'enabledValue')
+    ? options.enabledValue
+    : undefined;
+  const enabledGetter = typeof options.enabledGetter === 'function'
+    ? options.enabledGetter
+    : null;
+  const clone = cloneData(annotation);
+  clone.minecraft_style_enabled = Boolean(annotation?.minecraft_style_enabled);
+  clone.objects = [];
+  const sourceObjects = Array.isArray(annotation.objects) ? annotation.objects : [];
+  sourceObjects.forEach((object, index) => {
+    if (!includePredicate(object, index)) {
+      return;
+    }
+    const processedObject = processObjectForExport(annotation, object);
+    if (enabledGetter) {
+      processedObject.enabled = Boolean(enabledGetter(object, index));
+    } else if (typeof enabledValue === 'boolean') {
+      processedObject.enabled = enabledValue;
+    }
+    clone.objects.push(processedObject);
+  });
+  return clone;
+}
+
+function getProcessedGeometryForObject(annotation, object) {
+  if (!annotation || !object) {
+    return { polygon: [], bbox: null, minecraftStyle: Boolean(annotation?.minecraft_style_enabled) };
+  }
+  const minecraftStyle = getEffectiveMinecraftStyle(annotation, object);
+  const polygon = processPolygonPoints(object.polygon, minecraftStyle);
+  let bbox = null;
+  if (polygon.length > 0) {
+    const computed = computeBoundingBox(polygon);
+    if (computed) {
+      bbox = sanitizeBoundingBoxForStyle(computed, minecraftStyle);
+    }
+  }
+  if (!bbox && object.bbox) {
+    bbox = sanitizeBoundingBoxForStyle(object.bbox, minecraftStyle);
+  }
+  return { polygon, bbox, minecraftStyle };
+}
+
+function formatNumberForTooltip(value) {
+  if (!Number.isFinite(Number(value))) {
+    return '-';
+  }
+  const numeric = Number(value);
+  if (Math.abs(numeric - Math.round(numeric)) < 1e-6) {
+    return String(Math.round(numeric));
+  }
+  return numeric.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function formatPolygonForTooltip(polygon) {
+  if (!Array.isArray(polygon) || polygon.length === 0) {
+    return '—';
+  }
+  const parts = polygon.map(point => `(${formatNumberForTooltip(point.x)}, ${formatNumberForTooltip(point.y)})`);
+  return `[${parts.join(', ')}]`;
+}
+
+function formatBboxForTooltip(bbox) {
+  if (!bbox) {
+    return '—';
+  }
+  const x = formatNumberForTooltip(bbox.x);
+  const y = formatNumberForTooltip(bbox.y);
+  const w = formatNumberForTooltip(bbox.w);
+  const h = formatNumberForTooltip(bbox.h);
+  return `{x: ${x}, y: ${y}, w: ${w}, h: ${h}}`;
+}
+
+function buildTooltipForObject(annotation, object) {
+  const processed = getProcessedGeometryForObject(annotation, object);
+  const modeLabel = processed.minecraftStyle ? 'Minecraft (enteros)' : '2 decimales';
+  const originalPolygon = formatPolygonForTooltip(object.polygon);
+  const originalBbox = formatBboxForTooltip(object.bbox);
+  const processedPolygon = formatPolygonForTooltip(processed.polygon);
+  const processedBbox = formatBboxForTooltip(processed.bbox);
+  return [
+    'Original:',
+    `  Polígono: ${originalPolygon}`,
+    `  BBox: ${originalBbox}`,
+    `Procesado (${modeLabel}):`,
+    `  Polígono: ${processedPolygon}`,
+    `  BBox: ${processedBbox}`
+  ].join('\n');
 }
 
 function updateOrientationIssues() {
@@ -1171,6 +1510,9 @@ function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
     width: item.width || null,
     height: item.height || null,
     layer: item.layer || 'base',
+    minecraft_style_enabled: typeof item.minecraft_style_enabled === 'boolean'
+      ? item.minecraft_style_enabled
+      : state.sessionMinecraftStyleGlobal,
     objects: []
   };
   if (Array.isArray(item.objects)) {
@@ -1185,9 +1527,19 @@ function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
         orientationId = ORIENT_DEFAULT_ID;
         orientationDefaulted = true;
       }
+      if (!classSupportsOrientation(obj.class_name)) {
+        orientationId = ORIENT_DEFAULT_ID;
+        orientationDefaulted = false;
+      }
       const meta = obj.meta ? { ...obj.meta } : {};
       if (orientationDefaulted) {
         meta.orientationDefaulted = true;
+      }
+      let minecraftStyle = null;
+      if (Object.prototype.hasOwnProperty.call(obj, 'minecraft_style')) {
+        minecraftStyle = obj.minecraft_style === null
+          ? null
+          : Boolean(obj.minecraft_style);
       }
       return {
         id: obj.id || crypto.randomUUID(),
@@ -1198,7 +1550,8 @@ function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
         bbox: obj.bbox || null,
         isValid: obj.isValid !== false,
         meta,
-        enabled: obj.enabled !== false
+        enabled: obj.enabled !== false,
+        minecraft_style: minecraftStyle
       };
     });
   } else {
@@ -1217,7 +1570,8 @@ function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
           bbox: entry ? { x: entry.x, y: entry.y, w: entry.w, h: entry.h } : null,
           isValid: true,
           meta: { migrated: true, orientationDefaulted: true },
-          enabled: true
+          enabled: true,
+          minecraft_style: null
         };
         objects.push(object);
         migrationStats.migrated += 1;
@@ -1471,10 +1825,15 @@ function getCurrentAnnotation() {
       width: null,
       height: null,
       layer: 'base',
+      minecraft_style_enabled: state.sessionMinecraftStyleGlobal,
       objects: []
     };
   }
-  return state.annotations[image.name];
+  const annotation = state.annotations[image.name];
+  if (typeof annotation.minecraft_style_enabled !== 'boolean') {
+    annotation.minecraft_style_enabled = state.sessionMinecraftStyleGlobal;
+  }
+  return annotation;
 }
 
 function loadCurrentImage() {
@@ -1494,6 +1853,7 @@ function loadCurrentImage() {
     fitImageToCanvas();
     layerSelect.value = annotation.layer || 'base';
     updateImageInfo();
+    updateMinecraftStyleGlobalToggle(annotation);
     updateZonesList();
     redrawCanvas();
   };
@@ -1565,6 +1925,7 @@ function updateImageInfo() {
   if (!image) {
     imageNameLabel.textContent = '-';
     imageIndexLabel.textContent = '0/0';
+    updateMinecraftStyleGlobalToggle(null);
     return;
   }
   imageNameLabel.textContent = image.name;
@@ -1855,26 +2216,19 @@ async function saveAnnotations() {
   state.annotationErrors.clear();
 
   annotations.forEach(annotation => {
-    const fullClone = cloneData(annotation);
-    fullClone.objects = fullClone.objects.map((obj, index) => {
-      const original = annotation.objects[index];
-      const enabled = isObjectEnabledByConfig(original);
-      return { ...obj, enabled };
+    const processedFull = createProcessedAnnotation(annotation, {
+      includePredicate: () => true,
+      enabledGetter: object => isObjectEnabledByConfig(object)
     });
-    fullAnnotations.push(fullClone);
+    fullAnnotations.push(processedFull);
 
-    const filteredClone = cloneData(annotation);
-    filteredClone.objects = [];
-    annotation.objects.forEach(original => {
-      if (isObjectEnabledByConfig(original)) {
-        const cloneObj = cloneData(original);
-        cloneObj.enabled = true;
-        filteredClone.objects.push(cloneObj);
-      }
+    const processedFiltered = createProcessedAnnotation(annotation, {
+      includePredicate: object => isObjectEnabledByConfig(object),
+      enabledValue: true
     });
-    filteredAnnotations.push(filteredClone);
+    filteredAnnotations.push(processedFiltered);
 
-    const validation = generateYoloLines(annotation, state.config, state.classMap);
+    const validation = generateYoloLines(processedFull, state.config, state.classMap);
     perImageLines[annotation.file_name] = validation.lines;
     if (validation.errors.length > 0) {
       state.annotationErrors.set(annotation.file_name, validation.errors);
@@ -1954,7 +2308,8 @@ function finalizeDraftPolygon() {
     bbox: null,
     isValid: true,
     meta: {},
-    enabled: true
+    enabled: true,
+    minecraft_style: null
   };
   const adjustResult = adjustPolygonToAlpha(object.polygon, state.imageAlphaData);
   if (adjustResult.discard) {
@@ -2096,11 +2451,15 @@ function clampPointToImage(point, annotation) {
 }
 
 function updateDerivedData(annotation, object) {
+  if (!annotation || !object) {
+    return;
+  }
   if (state.classMap.has(object.class_name)) {
     object.class_id = state.classMap.get(object.class_name);
   } else if (typeof object.class_id !== 'number') {
     object.class_id = 0;
   }
+  enforceOrientationForObject(object);
   const orientationId = Number(object.class_orientation_id);
   if (!Number.isInteger(orientationId) || orientationId < 0 || orientationId >= ORIENTATION_COUNT) {
     object.class_orientation_id = ORIENT_DEFAULT_ID;
@@ -2111,6 +2470,14 @@ function updateDerivedData(annotation, object) {
   }
   if (!object.meta) {
     object.meta = {};
+  }
+  if (!Object.prototype.hasOwnProperty.call(object, 'minecraft_style')) {
+    object.minecraft_style = null;
+  } else if (object.minecraft_style !== null) {
+    object.minecraft_style = Boolean(object.minecraft_style);
+  }
+  if (typeof annotation.minecraft_style_enabled !== 'boolean') {
+    annotation.minecraft_style_enabled = state.sessionMinecraftStyleGlobal;
   }
   const bbox = computeBoundingBox(object.polygon);
   object.bbox = bbox;
@@ -2594,6 +2961,7 @@ function updateZonesList() {
         segments.push('orientación por defecto');
       }
       item.textContent = segments.join(' · ');
+      item.title = buildTooltipForObject(annotation, object);
       if (!object.isValid) {
         item.classList.add('invalid');
       }
