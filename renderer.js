@@ -1,6 +1,7 @@
 const HANDLE_CANVAS_PX = 8;
 const MOVE_HANDLE_CANVAS_PX = 12;
 const MIN_POLYGON_AREA = 5;
+const MIN_EYE_POLYGON_AREA = 1;
 const SAVE_DEBOUNCE_MS = 500;
 
 const ORIENTATIONS = [
@@ -2168,13 +2169,21 @@ function validatePolygon(annotation, object) {
       warnings.push('Algunos vértices fueron ajustados al borde de la imagen.');
     }
   }
+  const className = typeof object.class_name === 'string'
+    ? object.class_name
+    : (annotation && typeof annotation.class_name === 'string'
+        ? annotation.class_name
+        : (typeof state.currentClassName === 'string' ? state.currentClassName : null));
+  const minArea = className === 'ojos' ? MIN_EYE_POLYGON_AREA : MIN_POLYGON_AREA;
   const area = Math.abs(polygonArea(polygon));
-  if (area < MIN_POLYGON_AREA) {
-    errors.push('El área del polígono es demasiado pequeña.');
+  if (area < minArea) {
+    if (className !== 'ojos') {
+      errors.push('El área del polígono es demasiado pequeña.');
+    }
   }
   if (hasSelfIntersection(polygon)) {
     warnings.push('El polígono tiene auto-intersecciones.');
-     blockExport = true;
+    blockExport = true;
   }
   return { errors, warnings, blockExport };
 }
