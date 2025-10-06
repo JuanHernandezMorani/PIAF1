@@ -1,25 +1,44 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
-const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const Swal = require('sweetalert2');
 
 const fsp = fs.promises;
 
-const MODE_SETTINGS = {
-  minecraft: {
-    key: 'mc',
-    html: 'index.html',
-    imageDir: path.join(__dirname, 'toDrawMinecraft')
-  },
-  texture: {
-    key: 'tx',
-    html: 'textures.html',
-    imageDir: path.join(__dirname, 'toDrawNormal')
-  }
+const docsRoot = path.join(os.homedir(), 'Documents', 'DataTextureGUI');
+const dirs = {
+  unboxed: path.join(docsRoot, 'unboxedTextures'),
+  normal: path.join(docsRoot, 'normalTextures'),
+  labels: path.join(docsRoot, 'labels'),
+  train: path.join(docsRoot, 'trainingData'),
+  config: path.join(docsRoot, 'config')
 };
 
-const MODE_KEY_TO_NAME = {
-  mc: 'minecraft',
-  tx: 'texture'
+const internal = {
+  mc: path.join(__dirname, 'toDrawMinecraft'),
+  tx: path.join(__dirname, 'toDrawNormal')
+};
+
+const MODE_SETTINGS = {
+  minecraft: {
+    key: 'minecraft',
+    html: 'index.html',
+    imageDir: dirs.unboxed,
+    jsonlFile: 'trainDataMinecraft.jsonl',
+    fullJsonlFile: 'trainDataMinecraft.full.jsonl',
+    yamlFile: 'datasetMinecraft.yaml',
+    datasetDir: 'minecraftDataset'
+  },
+  texture: {
+    key: 'texture',
+    html: 'textures.html',
+    imageDir: dirs.normal,
+    jsonlFile: 'trainDataNormal.jsonl',
+    fullJsonlFile: 'trainDataNormal.full.jsonl',
+    yamlFile: 'datasetNormal.yaml',
+    datasetDir: 'textureDataset'
+  }
 };
 
 let currentMode = 'minecraft';
@@ -54,14 +73,57 @@ let mainWindow;
 
 const projectRoot = __dirname;
 const paths = {
-  images: path.join(projectRoot, 'toDrawMinecraft'),
-  jsonl: path.join(projectRoot, 'trainData.jsonl'),
-  fullJsonl: path.join(projectRoot, 'trainData.full.jsonl'),
-  labels: path.join(projectRoot, 'labels'),
+  images: MODE_SETTINGS.minecraft.imageDir,
+  jsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.jsonlFile),
+  fullJsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.fullJsonlFile),
+  labels: dirs.labels,
   classes: path.join(projectRoot, 'classes.txt'),
-  dataset: path.join(projectRoot, 'dataset'),
-  config: path.join(projectRoot, 'config.json')
+  dataset: path.join(dirs.train, MODE_SETTINGS.minecraft.datasetDir),
+  datasetYaml: path.join(dirs.train, MODE_SETTINGS.minecraft.yamlFile),
+  config: path.join(dirs.config, 'config.json')
 };
+
+function copyIfMissing(src, dest) {
+  if (!fs.existsSync(dest)) {
+    fs.mkdirSync(dest, { recursive: true });
+  }
+  try {
+    if (!fs.existsSync(src)) {
+      return;
+    }
+    for (const file of fs.readdirSync(src)) {
+      const srcPath = path.join(src, file);
+      const destPath = path.join(dest, file);
+      if (fs.existsSync(destPath)) {
+        continue;
+      }
+      const stat = fs.statSync(srcPath);
+      if (stat.isDirectory()) {
+        copyIfMissing(srcPath, destPath);
+      } else {
+        fs.copyFileSync(srcPath, destPath);
+      }
+    }
+  } catch (error) {
+    console.error('Error copiando ejemplos:', error);
+  }
+}
+
+function ensureExternalData() {
+  let firstSetup = false;
+  if (!fs.existsSync(docsRoot)) {
+    fs.mkdirSync(docsRoot, { recursive: true });
+    firstSetup = true;
+  }
+  Object.values(dirs).forEach(dir => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  });
+  copyIfMissing(internal.mc, dirs.unboxed);
+  copyIfMissing(internal.tx, dirs.normal);
+  return firstSetup;
+}
 
 function createDefaultConfig() {
   const orientationFilter = {};
@@ -77,7 +139,10 @@ function createDefaultConfig() {
         orientations: orientationFilter
       }
     },
-    default_mode: null
+    default_mode: null,
+    theme: 'default',
+    recent_files: [],
+    last_opened: null
   };
 }
 
@@ -117,6 +182,15 @@ function mergeConfigWithDefaults(partial) {
   if (!merged.default_mode || !['minecraft', 'texture'].includes(merged.default_mode)) {
     merged.default_mode = defaults.default_mode;
   }
+  if (!merged.theme || typeof merged.theme !== 'string') {
+    merged.theme = defaults.theme;
+  }
+  if (!Array.isArray(merged.recent_files)) {
+    merged.recent_files = [];
+  }
+  if (merged.last_opened && typeof merged.last_opened !== 'string') {
+    merged.last_opened = defaults.last_opened;
+  }
   return merged;
 }
 
@@ -130,14 +204,15 @@ function getModeSetting(mode = currentMode) {
   return MODE_SETTINGS[mode] || MODE_SETTINGS.minecraft;
 }
 
-function resolveModeNameFromKey(key) {
-  return MODE_KEY_TO_NAME[key] || 'minecraft';
-}
-
 function setCurrentMode(modeName) {
   const normalized = MODE_SETTINGS[modeName] ? modeName : 'minecraft';
   currentMode = normalized;
-  paths.images = getModeSetting(normalized).imageDir;
+  const settings = getModeSetting(normalized);
+  paths.images = settings.imageDir;
+  paths.jsonl = path.join(dirs.train, settings.jsonlFile);
+  paths.fullJsonl = path.join(dirs.train, settings.fullJsonlFile);
+  paths.dataset = path.join(dirs.train, settings.datasetDir);
+  paths.datasetYaml = path.join(dirs.train, settings.yamlFile);
 }
 
 async function determineStartupMode(win) {
@@ -148,26 +223,40 @@ async function determineStartupMode(win) {
     console.warn('No se pudo leer config al iniciar, usando valores por defecto.', error);
     config = createDefaultConfig();
   }
+
   const defaultMode = config && MODE_SETTINGS[config.default_mode] ? config.default_mode : null;
   if (defaultMode) {
     setCurrentMode(defaultMode);
-    return;
+    return { mode: defaultMode, remembered: true };
   }
 
   const selectionHtml = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Selecciona modo</title><script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script></head><body style="background:#1e1e1e;color:#f1f1f1;font-family:Arial, sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;"></body></html>`;
   await win.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(selectionHtml)}`);
-  const selectedKey = await win.webContents.executeJavaScript(`new Promise(resolve => { const attempt = () => { if (window.Swal && typeof window.Swal.fire === 'function') { Swal.fire({ title: 'Selecciona modo de trabajo', input: 'radio', inputOptions: { mc: 'Minecraft Mode (orientaciones 3D)', tx: 'Texture Mode (texturas 2D)' }, inputValidator: value => !value && 'Debes elegir un modo', confirmButtonText: 'Continuar', allowOutsideClick: false, confirmButtonColor: '#4CAF50' }).then(result => { resolve(result.value || 'mc'); }); } else { setTimeout(attempt, 50); } }; attempt(); })`);
-  const modeName = resolveModeNameFromKey(selectedKey);
+  win.show();
+  win.focus();
+
+  const { mode, remember } = await win.webContents.executeJavaScript(`new Promise(resolve => { const attempt = () => { if (window.Swal && typeof window.Swal.fire === 'function') { Swal.fire({ title: 'Selecciona modo de trabajo', input: 'radio', inputOptions: { minecraft: 'Minecraft Mode (orientaciones 3D)', texture: 'Texture Mode (texturas 2D)' }, inputValidator: value => !value && 'Debes elegir un modo', confirmButtonText: 'Continuar', allowOutsideClick: false, footer: '<label style="display:flex;align-items:center;gap:8px;justify-content:center;"><input type="checkbox" id="rememberMode" /> Recordar mi elección</label>' }).then(result => { const selected = result.value || 'minecraft'; const checkbox = document.getElementById('rememberMode'); const rememberChoice = checkbox ? checkbox.checked : false; resolve({ mode: selected, remember: rememberChoice }); }); } else { setTimeout(attempt, 50); } }; attempt(); })`);
+
+  const modeName = MODE_SETTINGS[mode] ? mode : 'minecraft';
   setCurrentMode(modeName);
+
   try {
-    config.default_mode = modeName;
+    if (remember) {
+      config.default_mode = modeName;
+    } else {
+      config.default_mode = null;
+    }
     await writeConfigAtomic(config);
   } catch (error) {
-    console.warn('No se pudo guardar el modo por defecto en config.json', error);
+    console.warn('No se pudo actualizar config.json con el modo seleccionado', error);
   }
+
+  return { mode: modeName, remembered: Boolean(remember) };
 }
 
 async function createWindow() {
+  const firstSetup = ensureExternalData();
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -179,15 +268,23 @@ async function createWindow() {
     }
   });
 
-  mainWindow.maximize();
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.maximize();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.setAlwaysOnTop(true);
+    mainWindow.setAlwaysOnTop(false);
+  });
 
-  mainWindow.setAlwaysOnTop(true);
-  mainWindow.show();
-  mainWindow.focus();
-  mainWindow.setAlwaysOnTop(false);
+  const { mode } = await determineStartupMode(mainWindow);
+  const modeSetting = getModeSetting(mode);
 
-  await determineStartupMode(mainWindow);
-  const modeSetting = getModeSetting();
+  mainWindow.webContents.once('did-finish-load', () => {
+    if (firstSetup) {
+      mainWindow.webContents.executeJavaScript(`if (window.Swal && typeof window.Swal.fire === 'function') { Swal.fire({ title: 'Carpeta de datos creada', text: 'Tus datos se guardarán en Documentos/DataTextureGUI/', icon: 'info', confirmButtonText: 'Entendido' }); }`).catch(() => {});
+    }
+  });
+
   await mainWindow.loadFile(modeSetting.html);
 }
 
@@ -402,6 +499,7 @@ ipcMain.handle('load-existing-data', async () => {
 async function saveJsonl(targetPath, data) {
   const payloadLines = Array.isArray(data) ? data.map(item => JSON.stringify(item)) : [];
   const payload = payloadLines.join('\n');
+  await ensureDir(path.dirname(targetPath));
   await writeFileAtomic(targetPath, payload, 'utf8');
 }
 
@@ -421,16 +519,19 @@ const handleSaveJsonl = async (event, payload) => {
 
   const errors = [];
 
+  const filteredName = path.basename(paths.jsonl);
+  const fullName = path.basename(paths.fullJsonl);
+
   try {
     await saveJsonl(paths.jsonl, normalized.filtered);
   } catch (error) {
     let detail = error.message;
     if (error.code === 'EACCES') {
-      detail = 'Permiso denegado al guardar trainData.jsonl. Ejecuta como administrador o cambia el directorio del proyecto.';
+      detail = `Permiso denegado al guardar ${filteredName}. Ejecuta como administrador o cambia el directorio del proyecto.`;
     } else if (error.code === 'ENOSPC') {
-      detail = 'No hay espacio en disco para guardar trainData.jsonl.';
+      detail = `No hay espacio en disco para guardar ${filteredName}.`;
     }
-    errors.push({ file: 'trainData.jsonl', error: detail });
+    errors.push({ file: filteredName, error: detail });
   }
 
   try {
@@ -438,11 +539,11 @@ const handleSaveJsonl = async (event, payload) => {
   } catch (error) {
     let detail = error.message;
     if (error.code === 'EACCES') {
-      detail = 'Permiso denegado al guardar trainData.full.jsonl. Ejecuta como administrador o cambia el directorio del proyecto.';
+      detail = `Permiso denegado al guardar ${fullName}. Ejecuta como administrador o cambia el directorio del proyecto.`;
     } else if (error.code === 'ENOSPC') {
-      detail = 'No hay espacio en disco para guardar trainData.full.jsonl.';
+      detail = `No hay espacio en disco para guardar ${fullName}.`;
     }
-    errors.push({ file: 'trainData.full.jsonl', error: detail });
+    errors.push({ file: fullName, error: detail });
   }
 
   if (errors.length > 0) {
@@ -652,7 +753,8 @@ ipcMain.handle('export-dataset', async (event, payload) => {
       `names: [${yamlNames.join(', ')}]`
     ].join('\n');
 
-    await writeFileAtomic(path.join(paths.dataset, 'dataset.yaml'), `${datasetYaml}\n`, 'utf8');
+    await ensureDir(path.dirname(paths.datasetYaml));
+    await writeFileAtomic(paths.datasetYaml, `${datasetYaml}\n`, 'utf8');
 
     return { success: true, results };
   } catch (error) {
