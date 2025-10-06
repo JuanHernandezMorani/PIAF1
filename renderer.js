@@ -6,26 +6,72 @@ const SAVE_DEBOUNCE_MS = 500;
 
 const PIAF_MODE = (typeof window !== 'undefined' && window.PIAF_MODE) ? window.PIAF_MODE : 'minecraft';
 const TEXTURE_MODE = PIAF_MODE === 'texture';
-const PATH_INFO = (typeof window !== 'undefined' && window.PIAF_PATHS) ? window.PIAF_PATHS : null;
+let PATH_INFO = (typeof window !== 'undefined' && window.PIAF_PATHS) ? window.PIAF_PATHS : null;
+let DIRECTORIES = PATH_INFO ? PATH_INFO.dirs : null;
+let CONFIG_FILES = PATH_INFO ? PATH_INFO.modeFiles : null;
+let DATASET_FILES = PATH_INFO ? PATH_INFO.datasets : null;
 
-if (typeof window !== 'undefined') {
-  console.log('[DEBUG] PIAF_PATHS inicializadas:', window.PIAF_PATHS);
+let drawFolder = DIRECTORIES ? (TEXTURE_MODE ? DIRECTORIES.normal : DIRECTORIES.unboxed) : '';
+let jsonlPath = DATASET_FILES ? (TEXTURE_MODE ? DATASET_FILES.texture?.jsonl : DATASET_FILES.minecraft?.jsonl) : '';
+let yamlPath = DATASET_FILES ? (TEXTURE_MODE ? DATASET_FILES.texture?.yaml : DATASET_FILES.minecraft?.yaml) : '';
+let fullJsonlPath = DATASET_FILES ? (TEXTURE_MODE ? DATASET_FILES.texture?.fullJsonl : DATASET_FILES.minecraft?.fullJsonl) : '';
+let jsonlName = jsonlPath ? jsonlPath.split(/[\\/]/).pop() : 'trainData.jsonl';
+let fullJsonlName = fullJsonlPath ? fullJsonlPath.split(/[\\/]/).pop() : 'trainData.full.jsonl';
+let yamlName = yamlPath ? yamlPath.split(/[\\/]/).pop() : 'dataset.yaml';
+
+let pendingClassList = [];
+let pendingOrientations = [];
+
+function refreshPathReferences() {
+  PATH_INFO = (typeof window !== 'undefined' && window.PIAF_PATHS) ? window.PIAF_PATHS : PATH_INFO;
+  DIRECTORIES = PATH_INFO ? PATH_INFO.dirs : null;
+  CONFIG_FILES = PATH_INFO ? PATH_INFO.modeFiles : null;
+  DATASET_FILES = PATH_INFO ? PATH_INFO.datasets : null;
+  drawFolder = DIRECTORIES ? (TEXTURE_MODE ? DIRECTORIES.normal : DIRECTORIES.unboxed) : '';
+  jsonlPath = DATASET_FILES ? (TEXTURE_MODE ? DATASET_FILES.texture?.jsonl : DATASET_FILES.minecraft?.jsonl) : '';
+  yamlPath = DATASET_FILES ? (TEXTURE_MODE ? DATASET_FILES.texture?.yaml : DATASET_FILES.minecraft?.yaml) : '';
+  fullJsonlPath = DATASET_FILES ? (TEXTURE_MODE ? DATASET_FILES.texture?.fullJsonl : DATASET_FILES.minecraft?.fullJsonl) : '';
+  jsonlName = jsonlPath ? jsonlPath.split(/[\\/]/).pop() : 'trainData.jsonl';
+  fullJsonlName = fullJsonlPath ? fullJsonlPath.split(/[\\/]/).pop() : 'trainData.full.jsonl';
+  yamlName = yamlPath ? yamlPath.split(/[\\/]/).pop() : 'dataset.yaml';
 }
-const FALLBACK_DIRS = {
-  unboxed: 'toDrawMinecraft',
-  normal: 'toDrawNormal',
-  labels: 'labels',
-  train: ''
-};
-const DIRECTORIES = PATH_INFO ? PATH_INFO.dirs : FALLBACK_DIRS;
-const drawFolder = TEXTURE_MODE ? DIRECTORIES.normal : DIRECTORIES.unboxed;
-const modeFiles = PATH_INFO ? PATH_INFO.modeFiles : null;
-const jsonlPath = modeFiles ? (TEXTURE_MODE ? modeFiles.texture.jsonl : modeFiles.minecraft.jsonl) : '';
-const yamlPath = modeFiles ? (TEXTURE_MODE ? modeFiles.texture.yaml : modeFiles.minecraft.yaml) : '';
-const fullJsonlPath = modeFiles ? (TEXTURE_MODE ? modeFiles.texture.fullJsonl : modeFiles.minecraft.fullJsonl) : '';
-const jsonlName = jsonlPath ? jsonlPath.split(/[\\/]/).pop() : 'trainData.jsonl';
-const fullJsonlName = fullJsonlPath ? fullJsonlPath.split(/[\\/]/).pop() : 'trainData.full.jsonl';
-const yamlName = yamlPath ? yamlPath.split(/[\\/]/).pop() : 'dataset.yaml';
+
+window.addEventListener('DOMContentLoaded', async () => {
+  console.group('🔍 [DEBUG RENDERER] Inicialización PIAF');
+  try {
+    if (!window.PIAF_PATHS) {
+      console.error('❌ PIAF_PATHS no definido - solicitando al backend');
+      if (window.electronAPI?.getPIAFPaths) {
+        window.PIAF_PATHS = await window.electronAPI.getPIAFPaths();
+      } else {
+        console.error('❌ No se puede obtener PIAF_PATHS');
+        if (typeof Swal !== 'undefined' && Swal?.fire) {
+          await Swal.fire('Error Crítico', 'No se pudieron cargar las rutas del sistema', 'error');
+        }
+        console.groupEnd();
+        return;
+      }
+    }
+
+    refreshPathReferences();
+
+    console.log('✅ PIAF_PATHS:', PATH_INFO);
+    console.log('🎮 Modo activo:', TEXTURE_MODE ? 'TEXTURE' : 'MINECRAFT');
+    console.log('📁 Carpeta imágenes:', drawFolder);
+
+    await ensureAletasClass();
+    await loadImagesWithValidation(drawFolder);
+    await loadConfigurationFiles();
+    await init();
+  } catch (error) {
+    console.error('❌ Error durante la inicialización de PIAF:', error);
+    if (typeof Swal !== 'undefined' && Swal?.fire) {
+      await Swal.fire('Error Crítico', error?.message || 'No se pudo inicializar la aplicación', 'error');
+    }
+  } finally {
+    console.groupEnd();
+  }
+});
 
 const ORIENTATIONS = TEXTURE_MODE ? [] : [
   { id: 0, key: 'arriba', label: 'Top' },
@@ -796,8 +842,6 @@ let objectMinecraftResetButton;
 let suppressObjectMinecraftStyleChange = false;
 let suppressGlobalMinecraftStyleChange = false;
 
-document.addEventListener('DOMContentLoaded', init);
-
 async function init() {
   if (noImages) {
     noImages.textContent = `No hay imágenes en la carpeta "${drawFolder}"`;
@@ -806,10 +850,8 @@ async function init() {
   setupAuxiliaryContainers();
   setupConfigPanel();
   setupEventListeners();
-  await ensureAletasClass();
-  await loadClasses();
+  applyLoadedClasses(pendingClassList);
   await loadConfig();
-  await loadImages();
   await loadExistingData();
   renderConfigPanel();
   updateImageList();
@@ -821,6 +863,140 @@ async function init() {
     noImages.style.display = 'block';
     canvas.style.display = 'none';
   }
+}
+
+async function loadImagesWithValidation(imageFolder) {
+  try {
+    if (!window.electronAPI?.fsExists || !window.electronAPI?.readDirectory) {
+      throw new Error('APIs de archivos no disponibles');
+    }
+
+    console.log(`[DEBUG] Buscando imágenes en: ${imageFolder}`);
+
+    if (!imageFolder) {
+      throw new Error('Ruta de imágenes no configurada');
+    }
+
+    const folderExists = await window.electronAPI.fsExists(imageFolder);
+    if (!folderExists) {
+      state.images = [];
+      if (typeof Swal !== 'undefined' && Swal?.fire) {
+        await Swal.fire({
+          title: 'Carpeta no encontrada',
+          text: `La carpeta no existe: ${imageFolder}`,
+          icon: 'error',
+          confirmButtonText: 'Entendido'
+        });
+      }
+      return;
+    }
+
+    const files = await window.electronAPI.readDirectory(imageFolder);
+    const imageFiles = files.filter(file => /\.(jpg|jpeg|png|gif|bmp|webp)$/i.test(file));
+
+    console.log(`[DEBUG] Encontrados ${imageFiles.length} archivos de imagen`);
+
+    if (imageFiles.length === 0) {
+      state.images = [];
+      if (typeof Swal !== 'undefined' && Swal?.fire) {
+        await Swal.fire({
+          title: 'Sin imágenes',
+          text: `No hay imágenes en la carpeta: ${imageFolder}`,
+          icon: 'warning',
+          confirmButtonText: 'Entendido'
+        });
+      }
+      return;
+    }
+
+    await loadImages(imageFiles, imageFolder);
+  } catch (error) {
+    state.images = [];
+    console.error('❌ Error cargando imágenes:', error);
+    if (typeof Swal !== 'undefined' && Swal?.fire) {
+      await Swal.fire({
+        title: 'Error de carga',
+        text: `No se pudieron cargar las imágenes: ${error.message}`,
+        icon: 'error',
+        confirmButtonText: 'Entendido'
+      });
+    }
+  }
+}
+
+async function loadConfigurationFiles() {
+  console.group('📋 [DEBUG] Cargando archivos de configuración');
+  try {
+    if (!window.electronAPI?.fsExists || !window.electronAPI?.readFile) {
+      throw new Error('APIs de configuración no disponibles');
+    }
+    if (!CONFIG_FILES) {
+      throw new Error('Rutas de configuración no disponibles');
+    }
+
+    const classesPath = CONFIG_FILES.classes;
+    console.log(`[DEBUG] Ruta clases: ${classesPath}`);
+
+    if (!classesPath) {
+      throw new Error('Ruta de classes.txt no definida');
+    }
+
+    const classesExist = await window.electronAPI.fsExists(classesPath);
+    if (!classesExist) {
+      console.warn('❌ Archivo de clases no encontrado, copiando desde recursos...');
+      await window.electronAPI.ensureAletas();
+    }
+
+    const classesContent = await window.electronAPI.readFile(classesPath);
+    pendingClassList = classesContent
+      .split('\n')
+      .map(className => className.trim())
+      .filter(className => className.length > 0);
+    window.availableClasses = pendingClassList;
+    console.log(`✅ Clases cargadas: ${pendingClassList.length}`);
+
+    const orientationsPath = CONFIG_FILES.orientations;
+    console.log(`[DEBUG] Ruta orientaciones: ${orientationsPath}`);
+
+    if (orientationsPath && await window.electronAPI.fsExists(orientationsPath)) {
+      const orientationsContent = await window.electronAPI.readFile(orientationsPath);
+      pendingOrientations = orientationsContent
+        .split('\n')
+        .map(value => value.trim())
+        .filter(value => value.length > 0);
+      console.log(`✅ Orientaciones cargadas: ${pendingOrientations.length}`);
+    } else {
+      console.warn('⚠️ Archivo de orientaciones no encontrado');
+      pendingOrientations = ['frontal', 'lateral', 'posterior', 'superior'];
+    }
+
+  } catch (error) {
+    pendingClassList = [];
+    pendingOrientations = [];
+    console.error('❌ Error cargando configuración:', error);
+    if (typeof Swal !== 'undefined' && Swal?.fire) {
+      await Swal.fire({
+        title: 'Error de configuración',
+        text: `No se pudieron cargar clases/orientaciones: ${error.message}`,
+        icon: 'error',
+        confirmButtonText: 'Entendido'
+      });
+    }
+  } finally {
+    window.availableClasses = pendingClassList;
+    window.orientations = pendingOrientations;
+    console.groupEnd();
+  }
+}
+
+function applyLoadedClasses(classList) {
+  const uniqueClasses = Array.isArray(classList)
+    ? Array.from(new Set(classList.map(item => item.trim()).filter(item => item.length > 0)))
+    : [];
+  state.classes = uniqueClasses;
+  syncConfigWithClasses();
+  buildClassSelector();
+  syncAnnotationsWithClassMap();
 }
 
 function setupAuxiliaryContainers() {
@@ -1097,6 +1273,33 @@ function setupEventListeners() {
   });
 }
 
+if (!window.__PIAF_ERROR_BOUND__) {
+  window.__PIAF_ERROR_BOUND__ = true;
+  window.addEventListener('error', event => {
+    console.error('🚨 [GLOBAL ERROR]', event.error);
+    if (typeof Swal !== 'undefined' && Swal?.fire) {
+      Swal.fire({
+        title: 'Error inesperado',
+        html: `<pre>${event.error?.message || 'Error desconocido'}</pre>`,
+        icon: 'error',
+        confirmButtonText: 'Cerrar'
+      });
+    }
+  });
+
+  window.addEventListener('unhandledrejection', event => {
+    console.error('🚨 [UNHANDLED PROMISE]', event.reason);
+    if (typeof Swal !== 'undefined' && Swal?.fire) {
+      Swal.fire({
+        title: 'Error en promesa',
+        html: `<pre>${event.reason?.message || 'Error no manejado'}</pre>`,
+        icon: 'error',
+        confirmButtonText: 'Cerrar'
+      });
+    }
+  });
+}
+
 function handleGlobalMinecraftStyleToggle() {
   if (suppressGlobalMinecraftStyleChange) {
     return;
@@ -1195,8 +1398,16 @@ function generateColorForClass(className) {
   return `rgba(${base[0]}, ${base[1]}, ${base[2]}, 0.4)`;
 }
 
-async function loadImages() {
-  const imagesResult = await window.electronAPI.loadImages();
+async function loadImages(imageFiles, imageFolder) {
+  const options = {};
+  if (imageFolder) {
+    options.directory = imageFolder;
+  }
+  if (Array.isArray(imageFiles) && imageFiles.length > 0) {
+    options.files = imageFiles;
+  }
+  const payload = Object.keys(options).length > 0 ? options : undefined;
+  const imagesResult = await window.electronAPI.loadImages(payload);
   if (!imagesResult.success) {
     showToast(`Error al cargar imágenes: ${imagesResult.error}`, 'error');
     state.images = [];
