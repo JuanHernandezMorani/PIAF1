@@ -4,7 +4,10 @@ const MIN_POLYGON_AREA = 4;
 const MIN_EYE_POLYGON_AREA = 1;
 const SAVE_DEBOUNCE_MS = 500;
 
-const ORIENTATIONS = [
+const PIAF_MODE = (typeof window !== 'undefined' && window.PIAF_MODE) ? window.PIAF_MODE : 'minecraft';
+const TEXTURE_MODE = PIAF_MODE === 'texture';
+
+const ORIENTATIONS = TEXTURE_MODE ? [] : [
   { id: 0, key: 'arriba', label: 'Top' },
   { id: 1, key: 'frente', label: 'Front' },
   { id: 2, key: 'espalda', label: 'Back' },
@@ -12,13 +15,13 @@ const ORIENTATIONS = [
   { id: 4, key: 'derecha', label: 'Right' },
   { id: 5, key: 'abajo', label: 'Bottom' }
 ];
-const ORIENTATION_COUNT = ORIENTATIONS.length;
+const ORIENTATION_COUNT = TEXTURE_MODE ? 1 : ORIENTATIONS.length;
 const ORIENT_DEFAULT_ID = 0;
 
-const ORIENTATION_CLASSES = ['body', 'extremities', 'armor', 'head'];
+const ORIENTATION_CLASSES = TEXTURE_MODE ? [] : ['body', 'extremities', 'armor', 'head'];
 const ORIENTATION_CLASS_SET = new Set(ORIENTATION_CLASSES);
 
-const NON_ORIENTATION_CLASSES = [
+const NON_ORIENTATION_CLASSES = TEXTURE_MODE ? [] : [
   'eyes',
   'mouth',
   'heart',
@@ -37,6 +40,9 @@ const NON_ORIENTATION_CLASSES = [
 const EYE_CLASS_ALIASES = new Set(['eyes', 'ojos', 'eye', 'ojo']);
 
 function classSupportsOrientation(className) {
+  if (TEXTURE_MODE) {
+    return false;
+  }
   return ORIENTATION_CLASS_SET.has(className);
 }
 
@@ -53,7 +59,7 @@ function clampProcessedCoordinate(value) {
 }
 
 function enforceOrientationForObject(object) {
-  if (!object) {
+  if (TEXTURE_MODE || !object) {
     return;
   }
   if (!classSupportsOrientation(object.class_name)) {
@@ -65,6 +71,17 @@ function enforceOrientationForObject(object) {
 }
 
 function createDefaultConfig() {
+  if (TEXTURE_MODE) {
+    return {
+      export: {
+        expandOrientations: false,
+        missingOrientationPolicy: 'default',
+        filter: {
+          classes: {}
+        }
+      }
+    };
+  }
   const orientationFilter = {};
   ORIENTATIONS.forEach(orientation => {
     orientationFilter[String(orientation.id)] = true;
@@ -108,6 +125,12 @@ function mergeConfigWithDefaults(partial) {
   }
   if (!merged.export.filter || typeof merged.export.filter !== 'object') {
     merged.export.filter = defaults.export.filter;
+  }
+  if (TEXTURE_MODE) {
+    if (!merged.export.filter.classes || typeof merged.export.filter.classes !== 'object') {
+      merged.export.filter.classes = {};
+    }
+    return merged;
   }
   const orientationFilter = { ...defaults.export.filter.orientations, ...(merged.export.filter.orientations || {}) };
   merged.export.filter.orientations = orientationFilter;
@@ -184,7 +207,7 @@ const state = {
   config: createDefaultConfig(),
   configDirty: false,
   configLoadError: false,
-  orientationOptions: ORIENTATIONS,
+  orientationOptions: TEXTURE_MODE ? [] : ORIENTATIONS,
   currentOrientationId: ORIENT_DEFAULT_ID,
   orientationIssues: { missing: 0 },
   sessionMinecraftStyleGlobal: false,
@@ -820,66 +843,72 @@ function setupConfigPanel() {
   orientationIssuesBanner.style.color = '#856404';
   orientationIssuesBanner.style.fontSize = '13px';
   orientationIssuesBanner.style.border = '1px solid #ffeeba';
-  configPanel.appendChild(orientationIssuesBanner);
+  if (!TEXTURE_MODE) {
+    configPanel.appendChild(orientationIssuesBanner);
+  }
 
-  const creationSection = document.createElement('div');
-  creationSection.style.display = 'flex';
-  creationSection.style.flexDirection = 'column';
-  creationSection.style.gap = '4px';
-  const creationLabel = document.createElement('label');
-  creationLabel.textContent = 'Orientación al crear nuevo objeto';
-  creationLabel.style.fontWeight = '600';
-  creationOrientationSelect = document.createElement('select');
-  creationOrientationSelect.addEventListener('change', () => {
-    state.currentOrientationId = Number(creationOrientationSelect.value);
-  });
-  creationSection.appendChild(creationLabel);
-  creationSection.appendChild(creationOrientationSelect);
-  configPanel.appendChild(creationSection);
+  if (!TEXTURE_MODE) {
+    const creationSection = document.createElement('div');
+    creationSection.style.display = 'flex';
+    creationSection.style.flexDirection = 'column';
+    creationSection.style.gap = '4px';
+    const creationLabel = document.createElement('label');
+    creationLabel.textContent = 'Orientación al crear nuevo objeto';
+    creationLabel.style.fontWeight = '600';
+    creationOrientationSelect = document.createElement('select');
+    creationOrientationSelect.addEventListener('change', () => {
+      state.currentOrientationId = Number(creationOrientationSelect.value);
+    });
+    creationSection.appendChild(creationLabel);
+    creationSection.appendChild(creationOrientationSelect);
+    configPanel.appendChild(creationSection);
+  }
 
   const exportSection = document.createElement('div');
   exportSection.style.display = 'flex';
   exportSection.style.flexDirection = 'column';
   exportSection.style.gap = '6px';
 
-  const expandRow = document.createElement('label');
-  expandRow.style.display = 'flex';
-  expandRow.style.alignItems = 'center';
-  expandRow.style.gap = '8px';
-  expandRow.textContent = 'Expandir orientaciones en exportación';
-  expandOrientationsToggle = document.createElement('input');
-  expandOrientationsToggle.type = 'checkbox';
-  expandOrientationsToggle.addEventListener('change', () => {
-    state.config.export.expandOrientations = expandOrientationsToggle.checked;
-    markConfigDirty();
-    updateOrientationIssues();
-    updateZonesList();
-  });
-  expandRow.prepend(expandOrientationsToggle);
-  exportSection.appendChild(expandRow);
+  if (!TEXTURE_MODE) {
+    const expandRow = document.createElement('label');
+    expandRow.style.display = 'flex';
+    expandRow.style.alignItems = 'center';
+    expandRow.style.gap = '8px';
+    expandRow.textContent = 'Expandir orientaciones en exportación';
+    expandOrientationsToggle = document.createElement('input');
+    expandOrientationsToggle.type = 'checkbox';
+    expandOrientationsToggle.addEventListener('change', () => {
+      state.config.export.expandOrientations = expandOrientationsToggle.checked;
+      markConfigDirty();
+      updateOrientationIssues();
+      updateZonesList();
+    });
+    expandRow.prepend(expandOrientationsToggle);
+    exportSection.appendChild(expandRow);
 
-  const missingRow = document.createElement('div');
-  missingRow.style.display = 'flex';
-  missingRow.style.flexDirection = 'column';
-  missingRow.style.gap = '4px';
-  const missingLabel = document.createElement('label');
-  missingLabel.textContent = 'Si falta orientación:';
-  missingOrientationSelect = document.createElement('select');
-  const defaultOption = document.createElement('option');
-  defaultOption.value = 'default';
-  defaultOption.textContent = 'Usar orientación por defecto (Top)';
-  const skipOption = document.createElement('option');
-  skipOption.value = 'skip';
-  skipOption.textContent = 'Omitir objeto en exportación';
-  missingOrientationSelect.append(defaultOption, skipOption);
-  missingOrientationSelect.addEventListener('change', () => {
-    state.config.export.missingOrientationPolicy = missingOrientationSelect.value;
-    markConfigDirty();
-    updateOrientationIssues();
-  });
-  missingRow.appendChild(missingLabel);
-  missingRow.appendChild(missingOrientationSelect);
-  exportSection.appendChild(missingRow);
+    const missingRow = document.createElement('div');
+    missingRow.style.display = 'flex';
+    missingRow.style.flexDirection = 'column';
+    missingRow.style.gap = '4px';
+    const missingLabel = document.createElement('label');
+    missingLabel.textContent = 'Si falta orientación:';
+    missingOrientationSelect = document.createElement('select');
+    const defaultOption = document.createElement('option');
+    defaultOption.value = 'default';
+    defaultOption.textContent = 'Usar orientación por defecto (Top)';
+    const skipOption = document.createElement('option');
+    skipOption.value = 'skip';
+    skipOption.textContent = 'Omitir objeto en exportación';
+    missingOrientationSelect.append(defaultOption, skipOption);
+    missingOrientationSelect.addEventListener('change', () => {
+      state.config.export.missingOrientationPolicy = missingOrientationSelect.value;
+      markConfigDirty();
+      updateOrientationIssues();
+    });
+    missingRow.appendChild(missingLabel);
+    missingRow.appendChild(missingOrientationSelect);
+    exportSection.appendChild(missingRow);
+  }
 
   saveConfigButton = document.createElement('button');
   saveConfigButton.type = 'button';
@@ -900,16 +929,18 @@ function setupConfigPanel() {
   classSection.appendChild(classFiltersContainer);
   configPanel.appendChild(classSection);
 
-  const orientSection = document.createElement('div');
-  const orientTitle = document.createElement('strong');
-  orientTitle.textContent = 'Orientaciones activas';
-  orientSection.appendChild(orientTitle);
-  orientationFiltersContainer = document.createElement('div');
-  orientationFiltersContainer.style.display = 'flex';
-  orientationFiltersContainer.style.flexWrap = 'wrap';
-  orientationFiltersContainer.style.gap = '6px';
-  orientSection.appendChild(orientationFiltersContainer);
-  configPanel.appendChild(orientSection);
+  if (!TEXTURE_MODE) {
+    const orientSection = document.createElement('div');
+    const orientTitle = document.createElement('strong');
+    orientTitle.textContent = 'Orientaciones activas';
+    orientSection.appendChild(orientTitle);
+    orientationFiltersContainer = document.createElement('div');
+    orientationFiltersContainer.style.display = 'flex';
+    orientationFiltersContainer.style.flexWrap = 'wrap';
+    orientationFiltersContainer.style.gap = '6px';
+    orientSection.appendChild(orientationFiltersContainer);
+    configPanel.appendChild(orientSection);
+  }
 
   selectedObjectPanel = document.createElement('div');
   selectedObjectPanel.style.display = 'none';
@@ -921,54 +952,56 @@ function setupConfigPanel() {
   selectedObjectPanel.style.backgroundColor = '#f9f9f9';
   const selectedTitle = document.createElement('strong');
   selectedTitle.textContent = 'Objeto seleccionado';
-  const orientationLabel = document.createElement('label');
-  orientationLabel.textContent = 'Orientación';
-  objectOrientationSelect = document.createElement('select');
-  objectOrientationSelect.addEventListener('change', () => {
-    const annotation = getCurrentAnnotation();
-    if (!annotation || !state.selectedObjectId) return;
-    const object = getObjectById(state.selectedObjectId);
-    if (!object) return;
-    const nonOrientable = NON_ORIENTATION_CLASSES.includes(object.class_name);
-    if (nonOrientable) {
-      if (object.class_orientation_id !== ORIENT_DEFAULT_ID) {
-        object.class_orientation_id = ORIENT_DEFAULT_ID;
-        if (object.meta) {
-          delete object.meta.orientationDefaulted;
-        }
-        updateDerivedData(annotation, object);
-        markImageDirty(annotation.file_name);
-        updateOrientationIssues();
-        updateZonesList();
-        redrawCanvas();
-      } else {
-        renderSelectedObjectPanel();
-      }
-      return;
-    }
-    if (!classSupportsOrientation(object.class_name)) {
-      object.class_orientation_id = ORIENT_DEFAULT_ID;
-      renderSelectedObjectPanel();
-      return;
-    }
-    const newId = Number(objectOrientationSelect.value);
-    if (object.class_orientation_id === newId) {
-      return;
-    }
-    pushHistory();
-    object.class_orientation_id = newId;
-    if (object.meta) {
-      delete object.meta.orientationDefaulted;
-    }
-    updateDerivedData(annotation, object);
-    markImageDirty(annotation.file_name);
-    updateOrientationIssues();
-    updateZonesList();
-    redrawCanvas();
-  });
   selectedObjectPanel.appendChild(selectedTitle);
-  selectedObjectPanel.appendChild(orientationLabel);
-  selectedObjectPanel.appendChild(objectOrientationSelect);
+  if (!TEXTURE_MODE) {
+    const orientationLabel = document.createElement('label');
+    orientationLabel.textContent = 'Orientación';
+    objectOrientationSelect = document.createElement('select');
+    objectOrientationSelect.addEventListener('change', () => {
+      const annotation = getCurrentAnnotation();
+      if (!annotation || !state.selectedObjectId) return;
+      const object = getObjectById(state.selectedObjectId);
+      if (!object) return;
+      const nonOrientable = NON_ORIENTATION_CLASSES.includes(object.class_name);
+      if (nonOrientable) {
+        if (object.class_orientation_id !== ORIENT_DEFAULT_ID) {
+          object.class_orientation_id = ORIENT_DEFAULT_ID;
+          if (object.meta) {
+            delete object.meta.orientationDefaulted;
+          }
+          updateDerivedData(annotation, object);
+          markImageDirty(annotation.file_name);
+          updateOrientationIssues();
+          updateZonesList();
+          redrawCanvas();
+        } else {
+          renderSelectedObjectPanel();
+        }
+        return;
+      }
+      if (!classSupportsOrientation(object.class_name)) {
+        object.class_orientation_id = ORIENT_DEFAULT_ID;
+        renderSelectedObjectPanel();
+        return;
+      }
+      const newId = Number(objectOrientationSelect.value);
+      if (object.class_orientation_id === newId) {
+        return;
+      }
+      pushHistory();
+      object.class_orientation_id = newId;
+      if (object.meta) {
+        delete object.meta.orientationDefaulted;
+      }
+      updateDerivedData(annotation, object);
+      markImageDirty(annotation.file_name);
+      updateOrientationIssues();
+      updateZonesList();
+      redrawCanvas();
+    });
+    selectedObjectPanel.appendChild(orientationLabel);
+    selectedObjectPanel.appendChild(objectOrientationSelect);
+  }
   const minecraftStyleRow = document.createElement('label');
   minecraftStyleRow.textContent = 'Minecraft Style';
   minecraftStyleRow.style.display = 'flex';
@@ -1001,17 +1034,19 @@ function setupEventListeners() {
     minecraftStyleGlobalToggle.addEventListener('change', handleGlobalMinecraftStyleToggle);
   }
 
-  layerSelect.addEventListener('change', () => {
-    const annotation = getCurrentAnnotation();
-    if (annotation) {
-      if (annotation.layer === layerSelect.value) {
-        return;
+  if (layerSelect) {
+    layerSelect.addEventListener('change', () => {
+      const annotation = getCurrentAnnotation();
+      if (annotation) {
+        if (annotation.layer === layerSelect.value) {
+          return;
+        }
+        pushHistory();
+        annotation.layer = layerSelect.value;
+        markImageDirty(annotation.file_name);
       }
-      pushHistory();
-      annotation.layer = layerSelect.value;
-      markImageDirty(annotation.file_name);
-    }
-  });
+    });
+  }
 
   saveBtn.addEventListener('click', () => triggerSave(false));
   prevBtn.addEventListener('click', () => navigateImage(-1));
@@ -1234,6 +1269,9 @@ function populateOrientationSelect(select) {
   if (!select) return;
   const previous = select.value;
   select.innerHTML = '';
+  if (TEXTURE_MODE) {
+    return;
+  }
   state.orientationOptions.forEach(option => {
     const opt = document.createElement('option');
     opt.value = String(option.id);
@@ -1301,6 +1339,9 @@ function renderClassFilters() {
 function renderOrientationFilters() {
   if (!orientationFiltersContainer) return;
   orientationFiltersContainer.innerHTML = '';
+  if (TEXTURE_MODE) {
+    return;
+  }
   ORIENTATIONS.forEach(option => {
     const wrapper = document.createElement('label');
     wrapper.style.display = 'flex';
@@ -1333,29 +1374,31 @@ function renderSelectedObjectPanel() {
   }
   selectedObjectPanel.style.display = 'flex';
   const annotation = getCurrentAnnotation();
-  const nonOrientable = NON_ORIENTATION_CLASSES.includes(object.class_name);
-  if (nonOrientable && object.class_orientation_id !== ORIENT_DEFAULT_ID) {
-    object.class_orientation_id = ORIENT_DEFAULT_ID;
-    if (object.meta) {
-      delete object.meta.orientationDefaulted;
+  if (!TEXTURE_MODE) {
+    const nonOrientable = NON_ORIENTATION_CLASSES.includes(object.class_name);
+    if (nonOrientable && object.class_orientation_id !== ORIENT_DEFAULT_ID) {
+      object.class_orientation_id = ORIENT_DEFAULT_ID;
+      if (object.meta) {
+        delete object.meta.orientationDefaulted;
+      }
+      if (annotation) {
+        updateDerivedData(annotation, object);
+        markImageDirty(annotation.file_name);
+        updateOrientationIssues();
+        updateZonesList();
+        redrawCanvas();
+      }
     }
-    if (annotation) {
-      updateDerivedData(annotation, object);
-      markImageDirty(annotation.file_name);
-      updateOrientationIssues();
-      updateZonesList();
-      redrawCanvas();
+    const orientationId = Number.isInteger(object.class_orientation_id)
+      ? object.class_orientation_id
+      : ORIENT_DEFAULT_ID;
+    const orientable = classSupportsOrientation(object.class_name);
+    if (objectOrientationSelect) {
+      objectOrientationSelect.value = String(orientationId);
+      objectOrientationSelect.disabled = nonOrientable || !orientable;
+      objectOrientationSelect.style.backgroundColor = nonOrientable ? '#eee' : '';
+      objectOrientationSelect.style.color = nonOrientable ? '#777' : '';
     }
-  }
-  const orientationId = Number.isInteger(object.class_orientation_id)
-    ? object.class_orientation_id
-    : ORIENT_DEFAULT_ID;
-  const orientable = classSupportsOrientation(object.class_name);
-  if (objectOrientationSelect) {
-    objectOrientationSelect.value = String(orientationId);
-    objectOrientationSelect.disabled = nonOrientable || !orientable;
-    objectOrientationSelect.style.backgroundColor = nonOrientable ? '#eee' : '';
-    objectOrientationSelect.style.color = nonOrientable ? '#777' : '';
   }
   if (objectMinecraftStyleToggle) {
     const override = Object.prototype.hasOwnProperty.call(object, 'minecraft_style')
@@ -1578,6 +1621,12 @@ function buildTooltipForObject(annotation, object) {
 
 function updateOrientationIssues() {
   if (!orientationIssuesBanner) return;
+  if (TEXTURE_MODE) {
+    orientationIssuesBanner.style.display = 'none';
+    state.orientationIssues.missing = 0;
+    orientationIssuesBanner.innerHTML = '';
+    return;
+  }
   let missing = 0;
   Object.values(state.annotations).forEach(annotation => {
     annotation.objects.forEach(object => {
@@ -1611,6 +1660,9 @@ function updateOrientationIssues() {
 }
 
 function assignDefaultOrientationToAll() {
+  if (TEXTURE_MODE) {
+    return;
+  }
   const currentAnnotation = getCurrentAnnotation();
   if (currentAnnotation) {
     pushHistory();
@@ -1653,6 +1705,12 @@ function syncConfigWithClasses() {
     }
   });
   state.config.export.filter.classes = updated;
+  if (TEXTURE_MODE) {
+    if (state.config.export.filter.orientations) {
+      delete state.config.export.filter.orientations;
+    }
+    return;
+  }
   if (!state.config.export.filter.orientations) {
     state.config.export.filter.orientations = {};
   }
@@ -1670,15 +1728,17 @@ function isObjectEnabledByConfig(object, config = state.config) {
   const orientationsFilter = filters.orientations || {};
   const classEnabled = classesFilter[object.class_name] !== false;
   if (!classEnabled) return false;
-  const orientationId = Number.isInteger(object.class_orientation_id)
-    ? object.class_orientation_id
-    : ORIENT_DEFAULT_ID;
-  const orientationEnabled = orientationsFilter[String(orientationId)] !== false;
-  if (!orientationEnabled) return false;
-  if (!object.isValid || object.validation?.blockExport) return false;
-  if (config.export.missingOrientationPolicy === 'skip' && object.meta?.orientationDefaulted) {
-    return false;
+  if (!TEXTURE_MODE) {
+    const orientationId = Number.isInteger(object.class_orientation_id)
+      ? object.class_orientation_id
+      : ORIENT_DEFAULT_ID;
+    const orientationEnabled = orientationsFilter[String(orientationId)] !== false;
+    if (!orientationEnabled) return false;
+    if (config.export.missingOrientationPolicy === 'skip' && object.meta?.orientationDefaulted) {
+      return false;
+    }
   }
+  if (!object.isValid || object.validation?.blockExport) return false;
   return true;
 }
 
@@ -1701,20 +1761,27 @@ function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
       const cleanPolygon = Array.isArray(obj.polygon)
         ? obj.polygon.map(pt => ({ x: Number(pt.x), y: Number(pt.y) }))
         : [];
-      const rawOrientation = Number(obj.class_orientation_id);
-      let orientationId = Number.isInteger(rawOrientation) ? rawOrientation : ORIENT_DEFAULT_ID;
-      let orientationDefaulted = false;
-      if (!Number.isInteger(rawOrientation) || rawOrientation < 0 || rawOrientation >= ORIENTATION_COUNT) {
-        orientationId = ORIENT_DEFAULT_ID;
-        orientationDefaulted = true;
-      }
-      if (!classSupportsOrientation(obj.class_name)) {
-        orientationId = ORIENT_DEFAULT_ID;
-        orientationDefaulted = false;
-      }
       const meta = obj.meta ? { ...obj.meta } : {};
-      if (orientationDefaulted) {
-        meta.orientationDefaulted = true;
+      if (TEXTURE_MODE && meta && meta.orientationDefaulted) {
+        delete meta.orientationDefaulted;
+      }
+      let orientationId = ORIENT_DEFAULT_ID;
+      if (!TEXTURE_MODE) {
+        const rawOrientation = Number(obj.class_orientation_id);
+        let orientationDefaulted = false;
+        if (!Number.isInteger(rawOrientation) || rawOrientation < 0 || rawOrientation >= ORIENTATION_COUNT) {
+          orientationId = ORIENT_DEFAULT_ID;
+          orientationDefaulted = true;
+        } else {
+          orientationId = rawOrientation;
+        }
+        if (!classSupportsOrientation(obj.class_name)) {
+          orientationId = ORIENT_DEFAULT_ID;
+          orientationDefaulted = false;
+        }
+        if (orientationDefaulted) {
+          meta.orientationDefaulted = true;
+        }
       }
       let minecraftStyle = null;
       if (Object.prototype.hasOwnProperty.call(obj, 'minecraft_style')) {
@@ -1750,7 +1817,7 @@ function normalizeAnnotation(item, migrationStats = { migrated: 0 }) {
           polygon,
           bbox: entry ? { x: entry.x, y: entry.y, w: entry.w, h: entry.h } : null,
           isValid: true,
-          meta: { migrated: true, orientationDefaulted: true },
+          meta: TEXTURE_MODE ? { migrated: true } : { migrated: true, orientationDefaulted: true },
           enabled: true,
           minecraft_style: null
         };
@@ -2038,7 +2105,9 @@ function loadCurrentImage() {
     annotation.height = img.naturalHeight;
     resizeCanvasToContainer();
     fitImageToCanvas();
-    layerSelect.value = annotation.layer || 'base';
+    if (layerSelect) {
+      layerSelect.value = annotation.layer || 'base';
+    }
     updateImageInfo();
     updateMinecraftStyleGlobalToggle(annotation);
     updateZonesList();
@@ -2437,6 +2506,7 @@ async function saveAnnotations() {
   const perImageLines = {};
   const filteredAnnotations = [];
   const fullAnnotations = [];
+  const textureObjects = [];
   state.annotationErrors.clear();
 
   annotations.forEach(annotation => {
@@ -2452,6 +2522,20 @@ async function saveAnnotations() {
     });
     filteredAnnotations.push(processedFiltered);
 
+    if (TEXTURE_MODE) {
+      processedFull.objects.forEach(object => {
+        const id = object.id || crypto.randomUUID();
+        const record = {
+          id,
+          class_name: object.class_name,
+          polygon: Array.isArray(object.polygon) ? object.polygon.map(pt => ({ x: pt.x, y: pt.y })) : [],
+          bbox: object.bbox ? { ...object.bbox } : null,
+          isValid: object.isValid !== false
+        };
+        textureObjects.push(record);
+      });
+    }
+
     const validation = generateYoloLines(processedFull, state.config, state.classMap);
     perImageLines[annotation.file_name] = validation.lines;
     if (validation.errors.length > 0) {
@@ -2464,7 +2548,10 @@ async function saveAnnotations() {
   updateZonesList();
   try {
     state.saveInProgress = true;
-    const jsonlResult = await window.electronAPI.saveJsonl({ filtered: filteredAnnotations, full: fullAnnotations });
+    const jsonlPayload = TEXTURE_MODE
+      ? { filtered: textureObjects, full: fullAnnotations }
+      : { filtered: filteredAnnotations, full: fullAnnotations };
+    const jsonlResult = await window.electronAPI.saveJsonl(jsonlPayload);
     if (!jsonlResult.success) {
       const detail = jsonlResult.details ? ` Detalles: ${JSON.stringify(jsonlResult.details)}` : '';
       throw new Error((jsonlResult.error || 'Error desconocido al guardar JSONL') + detail);
@@ -2685,11 +2772,15 @@ function updateDerivedData(annotation, object) {
     object.class_id = 0;
   }
   enforceOrientationForObject(object);
-  const orientationId = Number(object.class_orientation_id);
-  if (!Number.isInteger(orientationId) || orientationId < 0 || orientationId >= ORIENTATION_COUNT) {
-    object.class_orientation_id = ORIENT_DEFAULT_ID;
-    object.meta = object.meta || {};
-    object.meta.orientationDefaulted = true;
+  if (!TEXTURE_MODE) {
+    const orientationId = Number(object.class_orientation_id);
+    if (!Number.isInteger(orientationId) || orientationId < 0 || orientationId >= ORIENTATION_COUNT) {
+      object.class_orientation_id = ORIENT_DEFAULT_ID;
+      object.meta = object.meta || {};
+      object.meta.orientationDefaulted = true;
+    } else if (object.meta && object.meta.orientationDefaulted) {
+      delete object.meta.orientationDefaulted;
+    }
   } else if (object.meta && object.meta.orientationDefaulted) {
     delete object.meta.orientationDefaulted;
   }
@@ -2716,7 +2807,7 @@ function updateDerivedData(annotation, object) {
       }
     });
   }
-  if (object.meta?.orientationDefaulted) {
+  if (!TEXTURE_MODE && object.meta?.orientationDefaulted) {
     const message = `Orientación por defecto aplicada (${getOrientationLabel(ORIENT_DEFAULT_ID)}).`;
     if (!validation.warnings.includes(message)) {
       validation.warnings.push(message);
@@ -3181,14 +3272,14 @@ function updateZonesList() {
       const orientationKey = getOrientationKey(object.class_orientation_id);
       const nonOrientable = NON_ORIENTATION_CLASSES.includes(object.class_name);
       const segments = [`ID ${object.id.slice(0, 8)}`, `${object.polygon.length} vértices`];
-      if (!nonOrientable) {
+      if (!TEXTURE_MODE && !nonOrientable) {
         segments.push(`ori: ${orientationKey}`);
       }
       if (!isObjectEnabledByConfig(object)) {
         segments.push('desactivado');
         item.style.opacity = '0.6';
       }
-      if (object.meta?.orientationDefaulted) {
+      if (!TEXTURE_MODE && object.meta?.orientationDefaulted) {
         segments.push('orientación por defecto');
       }
       item.textContent = segments.join(' · ');
@@ -3199,7 +3290,7 @@ function updateZonesList() {
       if (object.validation?.blockExport) {
         item.classList.add('warning');
       }
-      if (object.meta?.orientationDefaulted) {
+      if (!TEXTURE_MODE && object.meta?.orientationDefaulted) {
         item.classList.add('warning');
       }
       item.addEventListener('click', () => {
@@ -3262,8 +3353,8 @@ function generateYoloLines(annotation, config, classMap) {
     return { lines, errors };
   }
   const { width, height } = annotation;
-  const expandOrientations = Boolean(config?.export?.expandOrientations);
-  const missingPolicy = config?.export?.missingOrientationPolicy || 'default';
+  const expandOrientations = TEXTURE_MODE ? false : Boolean(config?.export?.expandOrientations);
+  const missingPolicy = TEXTURE_MODE ? 'default' : (config?.export?.missingOrientationPolicy || 'default');
   const filters = config?.export?.filter || {};
   annotation.objects.forEach(object => {
     if (!object.isValid) {
@@ -3280,19 +3371,25 @@ function generateYoloLines(annotation, config, classMap) {
       return;
     }
     const baseClassId = classMap.get(object.class_name) ?? object.class_id ?? 0;
-    let orientationId = Number.isInteger(object.class_orientation_id) ? object.class_orientation_id : null;
-    const orientationValid = orientationId != null && orientationId >= 0 && orientationId < ORIENTATION_COUNT;
-    if (!orientationValid) {
-      if (missingPolicy === 'skip') {
-        errors.push({ objectId: object.id, message: 'Orientación ausente → objeto omitido.' });
+    let orientationId = ORIENT_DEFAULT_ID;
+    let orientationEnabled = true;
+    if (!TEXTURE_MODE) {
+      const rawOrientation = Number.isInteger(object.class_orientation_id) ? object.class_orientation_id : null;
+      const orientationValid = rawOrientation != null && rawOrientation >= 0 && rawOrientation < ORIENTATION_COUNT;
+      if (!orientationValid) {
+        if (missingPolicy === 'skip') {
+          errors.push({ objectId: object.id, message: 'Orientación ausente → objeto omitido.' });
+          return;
+        }
+        orientationId = ORIENT_DEFAULT_ID;
+      } else {
+        orientationId = rawOrientation;
+      }
+      const orientationKey = String(orientationId);
+      orientationEnabled = filters.orientations ? filters.orientations[orientationKey] !== false : true;
+      if (!orientationEnabled) {
         return;
       }
-      orientationId = ORIENT_DEFAULT_ID;
-    }
-    const orientationKey = String(orientationId);
-    const orientationEnabled = filters.orientations ? filters.orientations[orientationKey] !== false : true;
-    if (!orientationEnabled) {
-      return;
     }
     const coords = normalisePolygon(object.polygon, width, height);
     if (!coords) {
