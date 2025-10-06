@@ -185,8 +185,125 @@ const state = {
   orientationOptions: ORIENTATIONS,
   currentOrientationId: ORIENT_DEFAULT_ID,
   orientationIssues: { missing: 0 },
-  sessionMinecraftStyleGlobal: false
+  sessionMinecraftStyleGlobal: false,
+  clipboard: null,
+  history: [],
+  future: [],
+  historyPushedInDrag: false
 };
+
+function resetHistoryStacks() {
+  state.history = [];
+  state.future = [];
+}
+
+function pushHistory() {
+  const annotation = getCurrentAnnotation();
+  if (!annotation) return;
+  const snapshot = cloneData(annotation);
+  state.history.push(snapshot);
+  if (state.history.length > 50) {
+    state.history.shift();
+  }
+  state.future = [];
+}
+
+function applyAnnotationSnapshot(snapshot) {
+  if (!snapshot || !snapshot.file_name) {
+    return;
+  }
+  const cloned = cloneData(snapshot);
+  state.annotations[cloned.file_name] = cloned;
+  const currentImage = getCurrentImage();
+  if (currentImage && currentImage.name === cloned.file_name) {
+    state.selectedObjectId = null;
+    state.selectedVertexIndex = null;
+    state.draggingVertex = false;
+    state.draggingObject = false;
+    state.dragStartPoint = null;
+    state.dragStartPolygon = null;
+    state.drawingDraft = null;
+    state.historyPushedInDrag = false;
+    if (layerSelect) {
+      layerSelect.value = cloned.layer || 'base';
+    }
+    updateMinecraftStyleGlobalToggle(cloned);
+  }
+  markImageDirty(cloned.file_name);
+  updateOrientationIssues();
+  updateZonesList();
+  redrawCanvas();
+}
+
+function undo() {
+  if (state.history.length === 0) {
+    showToast('Nada que deshacer.', 'info');
+    return;
+  }
+  const current = getCurrentAnnotation();
+  const snapshot = state.history.pop();
+  if (current) {
+    state.future.push(cloneData(current));
+    if (state.future.length > 50) {
+      state.future.shift();
+    }
+  }
+  applyAnnotationSnapshot(snapshot);
+  showToast('Acción deshecha.', 'info');
+}
+
+function redo() {
+  if (state.future.length === 0) {
+    showToast('Nada que rehacer.', 'info');
+    return;
+  }
+  const current = getCurrentAnnotation();
+  const snapshot = state.future.pop();
+  if (current) {
+    state.history.push(cloneData(current));
+    if (state.history.length > 50) {
+      state.history.shift();
+    }
+  }
+  applyAnnotationSnapshot(snapshot);
+  showToast('Acción rehecha.', 'info');
+}
+
+function copySelectedObject() {
+  const annotation = getCurrentAnnotation();
+  const object = getObjectById(state.selectedObjectId);
+  if (!annotation || !object) {
+    showToast('No hay objeto seleccionado para copiar.', 'warning');
+    return;
+  }
+  state.clipboard = {
+    fileName: annotation.file_name,
+    object: cloneData(object)
+  };
+  showToast(`Objeto copiado: ${object.class_name}`, 'success');
+}
+
+function pasteCopiedObject() {
+  const annotation = getCurrentAnnotation();
+  if (!annotation || !state.clipboard || !state.clipboard.object) {
+    showToast('No hay objeto copiado.', 'warning');
+    return;
+  }
+  if (state.clipboard.fileName && state.clipboard.fileName !== annotation.file_name) {
+    showToast('El objeto copiado pertenece a otra imagen.', 'info');
+    return;
+  }
+  pushHistory();
+  const clone = cloneData(state.clipboard.object);
+  clone.id = crypto.randomUUID();
+  updateDerivedData(annotation, clone);
+  annotation.objects.push(clone);
+  markImageDirty(annotation.file_name);
+  selectObject(clone.id, null);
+  updateZonesList();
+  redrawCanvas();
+  showToast(`Objeto pegado (${clone.class_name})`, 'success');
+}
 
 /**
  * Configura un contexto 2D para renderizar pixel-art sin interpolación en la mayor
@@ -816,6 +933,10 @@ function setupConfigPanel() {
       return;
     }
     const newId = Number(objectOrientationSelect.value);
+    if (object.class_orientation_id === newId) {
+      return;
+    }
+    pushHistory();
     object.class_orientation_id = newId;
     if (object.meta) {
       delete object.meta.orientationDefaulted;
@@ -864,6 +985,10 @@ function setupEventListeners() {
   layerSelect.addEventListener('change', () => {
     const annotation = getCurrentAnnotation();
     if (annotation) {
+      if (annotation.layer === layerSelect.value) {
+        return;
+      }
+      pushHistory();
       annotation.layer = layerSelect.value;
       markImageDirty(annotation.file_name);
     }
@@ -903,10 +1028,14 @@ function handleGlobalMinecraftStyleToggle() {
   if (!annotation || !minecraftStyleGlobalToggle) {
     return;
   }
-  annotation.minecraft_style_enabled = minecraftStyleGlobalToggle.checked;
+  const newValue = minecraftStyleGlobalToggle.checked;
+  if (annotation.minecraft_style_enabled !== newValue) {
+    pushHistory();
+    annotation.minecraft_style_enabled = newValue;
+    markImageDirty(annotation.file_name);
+  }
   state.sessionMinecraftStyleGlobal = annotation.minecraft_style_enabled;
   persistSessionPreferences();
-  markImageDirty(annotation.file_name);
   updateZonesList();
   renderSelectedObjectPanel();
 }
@@ -1231,7 +1360,13 @@ function handleObjectMinecraftStyleToggleChange() {
   if (!annotation || !object || !objectMinecraftStyleToggle) {
     return;
   }
-  object.minecraft_style = objectMinecraftStyleToggle.checked;
+  const newValue = objectMinecraftStyleToggle.checked;
+  if (object.minecraft_style === newValue) {
+    objectMinecraftStyleToggle.indeterminate = false;
+    return;
+  }
+  pushHistory();
+  object.minecraft_style = newValue;
   objectMinecraftStyleToggle.indeterminate = false;
   markImageDirty(annotation.file_name);
   updateZonesList();
@@ -1243,6 +1378,10 @@ function resetObjectMinecraftStyle() {
   if (!annotation || !object) {
     return;
   }
+  if (object.minecraft_style === null || object.minecraft_style === undefined) {
+    return;
+  }
+  pushHistory();
   object.minecraft_style = null;
   markImageDirty(annotation.file_name);
   renderSelectedObjectPanel();
@@ -1434,6 +1573,10 @@ function updateOrientationIssues() {
 }
 
 function assignDefaultOrientationToAll() {
+  const currentAnnotation = getCurrentAnnotation();
+  if (currentAnnotation) {
+    pushHistory();
+  }
   const affectedFiles = new Set();
   Object.values(state.annotations).forEach(annotation => {
     annotation.objects.forEach(object => {
@@ -1798,6 +1941,12 @@ function setCurrentImage(index) {
   if (index < 0 || index >= state.images.length) {
     return;
   }
+  if (state.currentImageIndex !== index) {
+    resetHistoryStacks();
+    state.historyPushedInDrag = false;
+    state.selectedObjectId = null;
+    state.selectedVertexIndex = null;
+  }
   state.currentImageIndex = index;
   updateImageList();
   loadCurrentImage();
@@ -1978,6 +2127,7 @@ function handleMouseDown(event) {
   if (vertexHit) {
     selectObject(vertexHit.objectId, vertexHit.vertexIndex);
     state.draggingVertex = true;
+    state.historyPushedInDrag = false;
     return;
   }
 
@@ -1987,6 +2137,7 @@ function handleMouseDown(event) {
     state.draggingObject = true;
     state.dragStartPoint = point;
     state.dragStartPolygon = getObjectById(moveHandleHit.objectId).polygon.map(pt => ({ x: pt.x, y: pt.y }));
+    state.historyPushedInDrag = false;
     return;
   }
 
@@ -1996,6 +2147,7 @@ function handleMouseDown(event) {
     state.draggingObject = true;
     state.dragStartPoint = point;
     state.dragStartPolygon = objectHit.polygon.map(pt => ({ x: pt.x, y: pt.y }));
+    state.historyPushedInDrag = false;
     return;
   }
 
@@ -2030,6 +2182,10 @@ function handleMouseMove(event) {
     const annotation = getCurrentAnnotation();
     const object = getObjectById(state.selectedObjectId);
     if (object && annotation) {
+      if (!state.historyPushedInDrag) {
+        pushHistory();
+        state.historyPushedInDrag = true;
+      }
       const vertexIndex = state.selectedVertexIndex;
       if (vertexIndex != null) {
         object.polygon[vertexIndex] = clampPointToImage(point, annotation);
@@ -2046,6 +2202,10 @@ function handleMouseMove(event) {
     const annotation = getCurrentAnnotation();
     const object = getObjectById(state.selectedObjectId);
     if (object && annotation) {
+      if (!state.historyPushedInDrag) {
+        pushHistory();
+        state.historyPushedInDrag = true;
+      }
       const dx = point.x - state.dragStartPoint.x;
       const dy = point.y - state.dragStartPoint.y;
       object.polygon = state.dragStartPolygon.map(pt => clampPointToImage({ x: pt.x + dx, y: pt.y + dy }, annotation));
@@ -2087,6 +2247,7 @@ function handleMouseMove(event) {
 
 function handleMouseUp() {
   state.isPanning = false;
+  state.historyPushedInDrag = false;
   if (state.draggingVertex) {
     state.draggingVertex = false;
     state.selectedVertexIndex = null;
@@ -2127,6 +2288,7 @@ function handleDoubleClick(event) {
   if (!point) return;
   const edge = findEdgeForInsertion(object, point);
   if (edge != null) {
+    pushHistory();
     object.polygon.splice(edge + 1, 0, point);
     updateDerivedData(annotation, object);
     markImageDirty(annotation.file_name);
@@ -2136,10 +2298,38 @@ function handleDoubleClick(event) {
 }
 
 function handleKeyDown(event) {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
-    event.preventDefault();
-    triggerSave(true);
-    return;
+  const isCtrl = event.ctrlKey || event.metaKey;
+  if (isCtrl) {
+    const key = event.key.toLowerCase();
+    switch (key) {
+      case 's':
+        event.preventDefault();
+        triggerSave(true);
+        return;
+      case 'c':
+        event.preventDefault();
+        copySelectedObject();
+        return;
+      case 'v':
+        event.preventDefault();
+        pasteCopiedObject();
+        return;
+      case 'z':
+        event.preventDefault();
+        undo();
+        return;
+      case 'y':
+        event.preventDefault();
+        redo();
+        return;
+      case '0':
+        event.preventDefault();
+        fitImageToCanvas();
+        redrawCanvas();
+        return;
+      default:
+        break;
+    }
   }
 
   if (event.key === 'Enter' && state.drawingDraft) {
@@ -2165,6 +2355,7 @@ function handleKeyDown(event) {
           showToast('No es posible eliminar el vértice: el polígono quedaría inválido.', 'warning');
           return;
         }
+        pushHistory();
         object.polygon.splice(state.selectedVertexIndex, 1);
         state.selectedVertexIndex = null;
         updateDerivedData(annotation, object);
@@ -2177,6 +2368,7 @@ function handleKeyDown(event) {
     if (state.selectedObjectId) {
       const index = annotation.objects.findIndex(obj => obj.id === state.selectedObjectId);
       if (index >= 0) {
+        pushHistory();
         annotation.objects.splice(index, 1);
         markImageDirty(annotation.file_name);
         state.selectedObjectId = null;
@@ -2186,12 +2378,6 @@ function handleKeyDown(event) {
         redrawCanvas();
       }
     }
-  }
-
-  if ((event.ctrlKey || event.metaKey) && event.key === '0') {
-    event.preventDefault();
-    fitImageToCanvas();
-    redrawCanvas();
   }
 }
 
@@ -2323,6 +2509,7 @@ function finalizeDraftPolygon() {
     object.meta.autoAdjustedPending = true;
     object.meta.adjustedVertices = adjustResult.movedVertices.slice();
   }
+  pushHistory();
   updateDerivedData(annotation, object);
   annotation.objects.push(object);
   if (adjustResult.autoAdjusted) {
