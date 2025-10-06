@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Anotador de Imágenes</title>
+    <title>PIAF Texture Annotator</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Anotador de Imágenes</h1>
+            <h1>PIAF Texture Annotator</h1>
             <div class="controls">
                 <button id="saveBtn">Guardar</button>
                 <button id="prevBtn">Anterior</button>
@@ -46,21 +46,13 @@
                     <h3>Imágenes</h3>
                     <ul id="imageList"></ul>
                 </div>
-                <div class="layer-selector">
-                    <h3>Maps</h3>
-                    <select id="layerSelect">
-                        <option value="base">Base Map</option>
-                        <option value="emissive">Emissive Map</option>
-                        <option value="normal_map">Normal Map</option>
-                        <option value="specular">Specular Map</option>
-                    </select>
-                </div>
             </div>
+                
             <div class="image-area">
                 <div class="image-container">
                     <canvas id="imageCanvas"></canvas>
                     <div id="noImages" class="no-images">
-                        No hay imágenes en la carpeta 'toDrawMinecraft'
+                        No hay imágenes en la carpeta 'toDrawNormal'
                     </div>
                 </div>
                 <div class="image-info">
@@ -79,6 +71,6 @@
         </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
-    <script src="renderer.js"></script>
+    <script src="renderer_texture.js"></script>
 </body>
 </html>

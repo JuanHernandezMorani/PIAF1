@@ -4,6 +4,26 @@ const fs = require('fs');
 
 const fsp = fs.promises;
 
+const MODE_SETTINGS = {
+  minecraft: {
+    key: 'mc',
+    html: 'index.html',
+    imageDir: path.join(__dirname, 'toDrawMinecraft')
+  },
+  texture: {
+    key: 'tx',
+    html: 'textures.html',
+    imageDir: path.join(__dirname, 'toDrawNormal')
+  }
+};
+
+const MODE_KEY_TO_NAME = {
+  mc: 'minecraft',
+  tx: 'texture'
+};
+
+let currentMode = 'minecraft';
+
 const ORIENTATIONS = [
   { id: 0, key: 'arriba', label: 'Top' },
   { id: 1, key: 'frente', label: 'Front' },
@@ -34,7 +54,7 @@ let mainWindow;
 
 const projectRoot = __dirname;
 const paths = {
-  images: path.join(projectRoot, 'toDraw'),
+  images: path.join(projectRoot, 'toDrawMinecraft'),
   jsonl: path.join(projectRoot, 'trainData.jsonl'),
   fullJsonl: path.join(projectRoot, 'trainData.full.jsonl'),
   labels: path.join(projectRoot, 'labels'),
@@ -56,7 +76,8 @@ function createDefaultConfig() {
         classes: {},
         orientations: orientationFilter
       }
-    }
+    },
+    default_mode: null
   };
 }
 
@@ -93,6 +114,9 @@ function mergeConfigWithDefaults(partial) {
   if (!merged.export.filter.classes || typeof merged.export.filter.classes !== 'object') {
     merged.export.filter.classes = {};
   }
+  if (!merged.default_mode || !['minecraft', 'texture'].includes(merged.default_mode)) {
+    merged.default_mode = defaults.default_mode;
+  }
   return merged;
 }
 
@@ -102,7 +126,48 @@ const LEGACY_ZONES = [
   'armor', 'sky', 'stars', 'extra'
 ];
 
-function createWindow() {
+function getModeSetting(mode = currentMode) {
+  return MODE_SETTINGS[mode] || MODE_SETTINGS.minecraft;
+}
+
+function resolveModeNameFromKey(key) {
+  return MODE_KEY_TO_NAME[key] || 'minecraft';
+}
+
+function setCurrentMode(modeName) {
+  const normalized = MODE_SETTINGS[modeName] ? modeName : 'minecraft';
+  currentMode = normalized;
+  paths.images = getModeSetting(normalized).imageDir;
+}
+
+async function determineStartupMode(win) {
+  let config;
+  try {
+    config = await readConfigSafe();
+  } catch (error) {
+    console.warn('No se pudo leer config al iniciar, usando valores por defecto.', error);
+    config = createDefaultConfig();
+  }
+  const defaultMode = config && MODE_SETTINGS[config.default_mode] ? config.default_mode : null;
+  if (defaultMode) {
+    setCurrentMode(defaultMode);
+    return;
+  }
+
+  const selectionHtml = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Selecciona modo</title><script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script></head><body style="background:#1e1e1e;color:#f1f1f1;font-family:Arial, sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;"></body></html>`;
+  await win.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(selectionHtml)}`);
+  const selectedKey = await win.webContents.executeJavaScript(`new Promise(resolve => { const attempt = () => { if (window.Swal && typeof window.Swal.fire === 'function') { Swal.fire({ title: 'Selecciona modo de trabajo', input: 'radio', inputOptions: { mc: 'Minecraft Mode (orientaciones 3D)', tx: 'Texture Mode (texturas 2D)' }, inputValidator: value => !value && 'Debes elegir un modo', confirmButtonText: 'Continuar', allowOutsideClick: false, confirmButtonColor: '#4CAF50' }).then(result => { resolve(result.value || 'mc'); }); } else { setTimeout(attempt, 50); } }; attempt(); })`);
+  const modeName = resolveModeNameFromKey(selectedKey);
+  setCurrentMode(modeName);
+  try {
+    config.default_mode = modeName;
+    await writeConfigAtomic(config);
+  } catch (error) {
+    console.warn('No se pudo guardar el modo por defecto en config.json', error);
+  }
+}
+
+async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -121,10 +186,14 @@ function createWindow() {
   mainWindow.focus();
   mainWindow.setAlwaysOnTop(false);
 
-  mainWindow.loadFile('index.html');
+  await determineStartupMode(mainWindow);
+  const modeSetting = getModeSetting();
+  await mainWindow.loadFile(modeSetting.html);
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => createWindow()).catch(error => {
+  console.error('Error al crear la ventana principal:', error);
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -134,7 +203,9 @@ app.on('window-all-closed', () => {
 
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
+    createWindow().catch(error => {
+      console.error('Error al recrear la ventana principal:', error);
+    });
   }
 });
 
@@ -520,7 +591,7 @@ ipcMain.handle('export-dataset', async (event, payload) => {
 
     const splits = payload.splits || { train: 0.7, val: 0.2, test: 0.1 };
     const classNames = sanitiseClasses(payload.classes || []);
-    const expandOrientations = Boolean(payload.expandOrientations);
+    const expandOrientations = currentMode === 'minecraft' && Boolean(payload.expandOrientations);
     const classDisplayNames = [];
     classNames.forEach(className => {
       if (expandOrientations && !NON_ORIENTATION_CLASSES.includes(className)) {
