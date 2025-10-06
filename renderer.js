@@ -1,16 +1,16 @@
 const HANDLE_CANVAS_PX = 8;
 const MOVE_HANDLE_CANVAS_PX = 12;
-const MIN_POLYGON_AREA = 5;
+const MIN_POLYGON_AREA = 4;
 const MIN_EYE_POLYGON_AREA = 1;
 const SAVE_DEBOUNCE_MS = 500;
 
 const ORIENTATIONS = [
-  { id: 0, key: 'top', label: 'Top' },
-  { id: 1, key: 'front', label: 'Front' },
-  { id: 2, key: 'back', label: 'Back' },
-  { id: 3, key: 'left', label: 'Left' },
-  { id: 4, key: 'right', label: 'Right' },
-  { id: 5, key: 'bottom', label: 'Bottom' }
+  { id: 0, key: 'arriba', label: 'Top' },
+  { id: 1, key: 'frente', label: 'Front' },
+  { id: 2, key: 'espalda', label: 'Back' },
+  { id: 3, key: 'izquierda', label: 'Left' },
+  { id: 4, key: 'derecha', label: 'Right' },
+  { id: 5, key: 'abajo', label: 'Bottom' }
 ];
 const ORIENTATION_COUNT = ORIENTATIONS.length;
 const ORIENT_DEFAULT_ID = 0;
