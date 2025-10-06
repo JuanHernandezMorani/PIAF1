@@ -1,46 +1,19 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const Swal = require('sweetalert2');
 
 const fsp = fs.promises;
 
-const docsRoot = path.join(os.homedir(), 'Documents', 'DataTextureGUI');
-const dirs = {
-  unboxed: path.join(docsRoot, 'unboxedTextures'),
-  normal: path.join(docsRoot, 'normalTextures'),
-  labels: path.join(docsRoot, 'labels'),
-  train: path.join(docsRoot, 'trainingData'),
-  config: path.join(docsRoot, 'config')
-};
+let docsRoot = '';
+let dirs = {};
 
 const internal = {
   mc: path.join(__dirname, 'toDrawMinecraft'),
   tx: path.join(__dirname, 'toDrawNormal')
 };
 
-const MODE_SETTINGS = {
-  minecraft: {
-    key: 'minecraft',
-    html: 'index.html',
-    imageDir: dirs.unboxed,
-    jsonlFile: 'trainDataMinecraft.jsonl',
-    fullJsonlFile: 'trainDataMinecraft.full.jsonl',
-    yamlFile: 'datasetMinecraft.yaml',
-    datasetDir: 'minecraftDataset'
-  },
-  texture: {
-    key: 'texture',
-    html: 'textures.html',
-    imageDir: dirs.normal,
-    jsonlFile: 'trainDataNormal.jsonl',
-    fullJsonlFile: 'trainDataNormal.full.jsonl',
-    yamlFile: 'datasetNormal.yaml',
-    datasetDir: 'textureDataset'
-  }
-};
-
+let MODE_SETTINGS = {};
 let currentMode = 'minecraft';
 
 const ORIENTATIONS = [
@@ -72,16 +45,83 @@ const NON_ORIENTATION_CLASSES = [
 let mainWindow;
 
 const projectRoot = __dirname;
-const paths = {
-  images: MODE_SETTINGS.minecraft.imageDir,
-  jsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.jsonlFile),
-  fullJsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.fullJsonlFile),
-  labels: dirs.labels,
-  classes: path.join(projectRoot, 'classes.txt'),
-  dataset: path.join(dirs.train, MODE_SETTINGS.minecraft.datasetDir),
-  datasetYaml: path.join(dirs.train, MODE_SETTINGS.minecraft.yamlFile),
-  config: path.join(dirs.config, 'config.json')
-};
+let paths = {};
+
+ipcMain.handle('get-documents-path', () => {
+  return app.getPath('documents');
+});
+
+function initializePaths() {
+  const documentsPath = app.getPath('documents');
+  docsRoot = path.join(documentsPath, 'DataTextureGUI');
+  dirs = {
+    base: docsRoot,
+    unboxed: path.join(docsRoot, 'unboxedTextures'),
+    normal: path.join(docsRoot, 'normalTextures'),
+    labels: path.join(docsRoot, 'labels'),
+    train: path.join(docsRoot, 'trainingData'),
+    config: path.join(docsRoot, 'config')
+  };
+
+  MODE_SETTINGS = {
+    minecraft: {
+      key: 'minecraft',
+      html: 'index.html',
+      imageDir: dirs.unboxed,
+      jsonlFile: 'trainDataMinecraft.jsonl',
+      fullJsonlFile: 'trainDataMinecraft.full.jsonl',
+      yamlFile: 'datasetMinecraft.yaml',
+      datasetDir: 'minecraftDataset'
+    },
+    texture: {
+      key: 'texture',
+      html: 'textures.html',
+      imageDir: dirs.normal,
+      jsonlFile: 'trainDataNormal.jsonl',
+      fullJsonlFile: 'trainDataNormal.full.jsonl',
+      yamlFile: 'datasetNormal.yaml',
+      datasetDir: 'textureDataset'
+    }
+  };
+
+  paths = {
+    images: MODE_SETTINGS.minecraft.imageDir,
+    jsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.jsonlFile),
+    fullJsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.fullJsonlFile),
+    labels: dirs.labels,
+    classes: path.join(projectRoot, 'classes.txt'),
+    dataset: path.join(dirs.train, MODE_SETTINGS.minecraft.datasetDir),
+    datasetYaml: path.join(dirs.train, MODE_SETTINGS.minecraft.yamlFile),
+    config: path.join(dirs.config, 'config.json')
+  };
+}
+
+function ensurePathsInitialized() {
+  if (!docsRoot) {
+    initializePaths();
+  }
+}
+
+function migrateOldFolder() {
+  const home = require('os').homedir();
+  const oldDocs = path.join(home, 'Documents', 'DataTextureGUI');
+  const realDocs = path.join(app.getPath('documents'), 'DataTextureGUI');
+
+  try {
+    if (fs.existsSync(oldDocs) && !fs.existsSync(realDocs)) {
+      fs.mkdirSync(realDocs, { recursive: true });
+      for (const file of fs.readdirSync(oldDocs)) {
+        const src = path.join(oldDocs, file);
+        const dest = path.join(realDocs, file);
+        fs.renameSync(src, dest);
+      }
+      fs.rmSync(oldDocs, { recursive: true, force: true });
+      console.log('Migrated old Documents folder to real Documentos directory.');
+    }
+  } catch (err) {
+    console.error('Migration failed:', err);
+  }
+}
 
 function copyIfMissing(src, dest) {
   if (!fs.existsSync(dest)) {
@@ -110,6 +150,7 @@ function copyIfMissing(src, dest) {
 }
 
 function ensureExternalData() {
+  ensurePathsInitialized();
   let firstSetup = false;
   if (!fs.existsSync(docsRoot)) {
     fs.mkdirSync(docsRoot, { recursive: true });
@@ -255,6 +296,7 @@ async function determineStartupMode(win) {
 }
 
 async function createWindow() {
+  ensurePathsInitialized();
   const firstSetup = ensureExternalData();
 
   mainWindow = new BrowserWindow({
@@ -279,6 +321,38 @@ async function createWindow() {
   const { mode } = await determineStartupMode(mainWindow);
   const modeSetting = getModeSetting(mode);
 
+  mainWindow.webContents.on('did-finish-load', () => {
+    const docsReal = app.getPath('documents');
+    const baseDocs = path.join(docsReal, 'DataTextureGUI');
+    const exposedDirs = {
+      base: baseDocs,
+      unboxed: path.join(baseDocs, 'unboxedTextures'),
+      normal: path.join(baseDocs, 'normalTextures'),
+      labels: path.join(baseDocs, 'labels'),
+      train: path.join(baseDocs, 'trainingData'),
+      config: path.join(baseDocs, 'config')
+    };
+
+    const modeFiles = {
+      minecraft: {
+        jsonl: path.join(exposedDirs.train, 'trainDataMinecraft.jsonl'),
+        fullJsonl: path.join(exposedDirs.train, 'trainDataMinecraft.full.jsonl'),
+        yaml: path.join(exposedDirs.train, 'datasetMinecraft.yaml')
+      },
+      texture: {
+        jsonl: path.join(exposedDirs.train, 'trainDataNormal.jsonl'),
+        fullJsonl: path.join(exposedDirs.train, 'trainDataNormal.full.jsonl'),
+        yaml: path.join(exposedDirs.train, 'datasetNormal.yaml')
+      }
+    };
+
+    mainWindow.webContents.executeJavaScript(
+      `window.PIAF_PATHS = ${JSON.stringify({ dirs: exposedDirs, modeFiles })};`
+    ).catch(error => {
+      console.error('Failed to inject PIAF_PATHS:', error);
+    });
+  });
+
   mainWindow.webContents.once('did-finish-load', () => {
     if (firstSetup) {
       mainWindow.webContents.executeJavaScript(`if (window.Swal && typeof window.Swal.fire === 'function') { Swal.fire({ title: 'Carpeta de datos creada', text: 'Tus datos se guardarán en Documentos/DataTextureGUI/', icon: 'info', confirmButtonText: 'Entendido' }); }`).catch(() => {});
@@ -288,7 +362,11 @@ async function createWindow() {
   await mainWindow.loadFile(modeSetting.html);
 }
 
-app.whenReady().then(() => createWindow()).catch(error => {
+app.whenReady().then(async () => {
+  ensurePathsInitialized();
+  migrateOldFolder();
+  await createWindow();
+}).catch(error => {
   console.error('Error al crear la ventana principal:', error);
 });
 
