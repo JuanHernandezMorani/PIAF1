@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const Swal = require('sweetalert2');
 
 const fsp = fs.promises;
@@ -51,13 +52,50 @@ ipcMain.handle('get-documents-path', () => {
   return app.getPath('documents');
 });
 
+function resolveWithinDocs(targetPath) {
+  ensurePathsInitialized();
+  if (!targetPath || typeof targetPath !== 'string') {
+    throw new Error('Ruta inválida');
+  }
+  const resolved = path.resolve(targetPath);
+  const baseResolved = path.resolve(docsRoot);
+  const relative = path.relative(baseResolved, resolved);
+  if (relative && relative.startsWith('..')) {
+    throw new Error('Acceso denegado fuera de DataTextureGUI');
+  }
+  return resolved;
+}
+
+ipcMain.handle('fs-exists', async (event, targetPath) => {
+  try {
+    const resolved = resolveWithinDocs(targetPath);
+    await fsp.access(resolved, fs.constants.F_OK);
+    return true;
+  } catch (error) {
+    if (error && error.message && error.message.includes('Acceso denegado')) {
+      console.warn('[DEBUG MAIN] Intento de acceso fuera de DataTextureGUI:', targetPath);
+    }
+    return false;
+  }
+});
+
+ipcMain.handle('read-directory', async (event, targetPath) => {
+  const resolved = resolveWithinDocs(targetPath);
+  return fsp.readdir(resolved);
+});
+
+ipcMain.handle('read-file', async (event, targetPath) => {
+  const resolved = resolveWithinDocs(targetPath);
+  return fsp.readFile(resolved, 'utf8');
+});
+
 function initializePaths() {
   const documentsPath = app.getPath('documents');
   docsRoot = path.join(documentsPath, 'DataTextureGUI');
   dirs = {
     base: docsRoot,
-    unboxed: path.join(docsRoot, 'unboxedTextures'),
-    normal: path.join(docsRoot, 'normalTextures'),
+    unboxed: path.join(docsRoot, 'unboxed'),
+    normal: path.join(docsRoot, 'normal'),
     labels: path.join(docsRoot, 'labels'),
     train: path.join(docsRoot, 'trainingData'),
     config: path.join(docsRoot, 'config')
@@ -89,7 +127,9 @@ function initializePaths() {
     jsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.jsonlFile),
     fullJsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.fullJsonlFile),
     labels: dirs.labels,
-    classes: path.join(projectRoot, 'classes.txt'),
+    classes: path.join(dirs.config, 'classes.txt'),
+    orientations: path.join(dirs.config, 'orientations.txt'),
+    textureModeFile: path.join(dirs.config, 'textureMode.txt'),
     dataset: path.join(dirs.train, MODE_SETTINGS.minecraft.datasetDir),
     datasetYaml: path.join(dirs.train, MODE_SETTINGS.minecraft.yamlFile),
     config: path.join(dirs.config, 'config.json')
@@ -149,6 +189,34 @@ function copyIfMissing(src, dest) {
   }
 }
 
+function ensureConfigFiles() {
+  try {
+    if (!dirs.config) {
+      return;
+    }
+    fs.mkdirSync(dirs.config, { recursive: true });
+
+    const defaultClasses = path.join(projectRoot, 'classes.txt');
+    const targetClasses = path.join(dirs.config, 'classes.txt');
+    if (!fs.existsSync(targetClasses) && fs.existsSync(defaultClasses)) {
+      fs.copyFileSync(defaultClasses, targetClasses);
+    }
+
+    const targetOrientations = path.join(dirs.config, 'orientations.txt');
+    if (!fs.existsSync(targetOrientations)) {
+      const orientationLines = ORIENTATIONS.map(item => item.key).join('\n');
+      fs.writeFileSync(targetOrientations, `${orientationLines}\n`, 'utf8');
+    }
+
+    const targetTextureMode = path.join(dirs.config, 'textureMode.txt');
+    if (!fs.existsSync(targetTextureMode)) {
+      fs.writeFileSync(targetTextureMode, 'minecraft\n', 'utf8');
+    }
+  } catch (error) {
+    console.error('Error asegurando archivos de configuración:', error);
+  }
+}
+
 function ensureExternalData() {
   ensurePathsInitialized();
   let firstSetup = false;
@@ -163,6 +231,7 @@ function ensureExternalData() {
   });
   copyIfMissing(internal.mc, dirs.unboxed);
   copyIfMissing(internal.tx, dirs.normal);
+  ensureConfigFiles();
   return firstSetup;
 }
 
@@ -299,6 +368,45 @@ async function createWindow() {
   ensurePathsInitialized();
   const firstSetup = ensureExternalData();
 
+  const datasetFiles = {
+    minecraft: {
+      jsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.jsonlFile),
+      fullJsonl: path.join(dirs.train, MODE_SETTINGS.minecraft.fullJsonlFile),
+      yaml: path.join(dirs.train, MODE_SETTINGS.minecraft.yamlFile)
+    },
+    texture: {
+      jsonl: path.join(dirs.train, MODE_SETTINGS.texture.jsonlFile),
+      fullJsonl: path.join(dirs.train, MODE_SETTINGS.texture.fullJsonlFile),
+      yaml: path.join(dirs.train, MODE_SETTINGS.texture.yamlFile)
+    }
+  };
+
+  const externalPaths = {
+    dirs: {
+      base: dirs.base,
+      unboxed: dirs.unboxed,
+      normal: dirs.normal,
+      labels: dirs.labels,
+      train: dirs.train,
+      config: dirs.config
+    },
+    modeFiles: {
+      textureMode: paths.textureModeFile,
+      classes: paths.classes,
+      orientations: paths.orientations
+    },
+    datasets: datasetFiles,
+    baseDocs: docsRoot
+  };
+
+  const serializedPaths = JSON.stringify(externalPaths);
+  const escapedSerializedPaths = serializedPaths
+    .replace(/\\/g, '\\\\')
+    .replace(/`/g, '\\`')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -306,7 +414,8 @@ async function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.js'),
+      additionalArguments: [`--PIAF_PATHS=${serializedPaths}`]
     }
   });
 
@@ -321,39 +430,18 @@ async function createWindow() {
   const { mode } = await determineStartupMode(mainWindow);
   const modeSetting = getModeSetting(mode);
 
-  mainWindow.webContents.on('did-finish-load', () => {
-    const docsReal = app.getPath('documents');
-    const baseDocs = path.join(docsReal, 'DataTextureGUI');
-    const exposedDirs = {
-      base: baseDocs,
-      unboxed: path.join(baseDocs, 'unboxedTextures'),
-      normal: path.join(baseDocs, 'normalTextures'),
-      labels: path.join(baseDocs, 'labels'),
-      train: path.join(baseDocs, 'trainingData'),
-      config: path.join(baseDocs, 'config')
-    };
-
-    const modeFiles = {
-      minecraft: {
-        jsonl: path.join(exposedDirs.train, 'trainDataMinecraft.jsonl'),
-        fullJsonl: path.join(exposedDirs.train, 'trainDataMinecraft.full.jsonl'),
-        yaml: path.join(exposedDirs.train, 'datasetMinecraft.yaml')
-      },
-      texture: {
-        jsonl: path.join(exposedDirs.train, 'trainDataNormal.jsonl'),
-        fullJsonl: path.join(exposedDirs.train, 'trainDataNormal.full.jsonl'),
-        yaml: path.join(exposedDirs.train, 'datasetNormal.yaml')
-      }
-    };
-
-    mainWindow.webContents.executeJavaScript(
-      `window.PIAF_PATHS = ${JSON.stringify({ dirs: exposedDirs, modeFiles })};`
-    ).catch(error => {
-      console.error('Failed to inject PIAF_PATHS:', error);
-    });
-  });
-
   mainWindow.webContents.once('did-finish-load', () => {
+    mainWindow.webContents.executeJavaScript(
+      `
+        if (!window.PIAF_PATHS) {
+          window.PIAF_PATHS = JSON.parse('${escapedSerializedPaths}');
+          console.log('[DEBUG MAIN] PIAF_PATHS inyectado post-carga');
+        }
+      `
+    ).catch(error => {
+      console.error('Error al inyectar PIAF_PATHS tras la carga:', error);
+    });
+
     if (firstSetup) {
       mainWindow.webContents.executeJavaScript(`if (window.Swal && typeof window.Swal.fire === 'function') { Swal.fire({ title: 'Carpeta de datos creada', text: 'Tus datos se guardarán en Documentos/DataTextureGUI/', icon: 'info', confirmButtonText: 'Entendido' }); }`).catch(() => {});
     }
@@ -519,17 +607,34 @@ async function ensureAletasInClasses() {
   }
 }
 
-ipcMain.handle('load-images', async () => {
+ipcMain.handle('load-images', async (event, options = {}) => {
   try {
-    await ensureDir(paths.images);
-    const files = await fsp.readdir(paths.images);
-    const imageFiles = files.filter(file => /\.(png|jpg|jpeg|gif|bmp)$/i.test(file));
+    let targetDir = paths.images;
+    let providedFiles = null;
+
+    if (typeof options === 'string') {
+      targetDir = options;
+    } else if (options && typeof options === 'object') {
+      if (options.directory) {
+        targetDir = options.directory;
+      }
+      if (Array.isArray(options.files)) {
+        providedFiles = options.files;
+      }
+    }
+
+    const resolvedDir = resolveWithinDocs(targetDir);
+    await ensureDir(resolvedDir);
+
+    const files = providedFiles || await fsp.readdir(resolvedDir);
+    const imageFiles = files.filter(file => /\.(png|jpg|jpeg|gif|bmp|webp)$/i.test(file));
     const images = imageFiles.map(file => {
-      const imagePath = path.join(paths.images, file);
+      const imagePath = path.join(resolvedDir, file);
+      const dataUrl = pathToFileURL(imagePath).href;
       return {
         name: file,
         path: imagePath,
-        dataUrl: `file://${imagePath}`
+        dataUrl
       };
     });
     return { success: true, images };

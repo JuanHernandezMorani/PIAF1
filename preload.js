@@ -1,40 +1,29 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const path = require('path');
 
-async function buildPaths() {
-  const docsPath = await ipcRenderer.invoke('get-documents-path');
-  const baseDocs = path.join(docsPath, 'DataTextureGUI');
-  const dirs = {
-    base: baseDocs,
-    unboxed: path.join(baseDocs, 'unboxedTextures'),
-    normal: path.join(baseDocs, 'normalTextures'),
-    labels: path.join(baseDocs, 'labels'),
-    train: path.join(baseDocs, 'trainingData'),
-    config: path.join(baseDocs, 'config')
-  };
-
-  const modeFiles = {
-    minecraft: {
-      jsonl: path.join(dirs.train, 'trainDataMinecraft.jsonl'),
-      fullJsonl: path.join(dirs.train, 'trainDataMinecraft.full.jsonl'),
-      yaml: path.join(dirs.train, 'datasetMinecraft.yaml')
-    },
-    texture: {
-      jsonl: path.join(dirs.train, 'trainDataNormal.jsonl'),
-      fullJsonl: path.join(dirs.train, 'trainDataNormal.full.jsonl'),
-      yaml: path.join(dirs.train, 'datasetNormal.yaml')
+const getPIAFPaths = () => {
+  for (const arg of process.argv) {
+    if (arg.startsWith('--PIAF_PATHS=')) {
+      try {
+        const raw = arg.slice('--PIAF_PATHS='.length);
+        return JSON.parse(raw);
+      } catch (e) {
+        console.error('[DEBUG PRELOAD] Error parseando PIAF_PATHS:', e);
+      }
     }
+  }
+
+  const fallbackPaths = {
+    dirs: { base: '', unboxed: '', normal: '', labels: '', train: '', config: '' },
+    modeFiles: { textureMode: '', classes: '', orientations: '' },
+    datasets: { minecraft: {}, texture: {} },
+    baseDocs: require('path').join(require('os').homedir(), 'Documents', 'DataTextureGUI')
   };
-
-  contextBridge.exposeInMainWorld('PIAF_PATHS', { dirs, modeFiles });
-}
-
-buildPaths().catch(err => {
-  console.error('Failed to expose PIAF_PATHS:', err);
-});
+  console.warn('[DEBUG PRELOAD] Usando fallback paths');
+  return fallbackPaths;
+};
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  loadImages: () => ipcRenderer.invoke('load-images'),
+  loadImages: options => ipcRenderer.invoke('load-images', options),
   loadExistingData: () => ipcRenderer.invoke('load-existing-data'),
   saveJsonl: data => ipcRenderer.invoke('save-jsonl', data),
   saveData: data => ipcRenderer.invoke('save-jsonl', data),
@@ -44,5 +33,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveClasses: classes => ipcRenderer.invoke('save-classes', classes),
   loadConfig: () => ipcRenderer.invoke('load-config'),
   saveConfig: cfg => ipcRenderer.invoke('save-config', cfg),
-  ensureAletas: () => ipcRenderer.invoke('ensure-aletas')
+  ensureAletas: () => ipcRenderer.invoke('ensure-aletas'),
+  fsExists: targetPath => ipcRenderer.invoke('fs-exists', targetPath),
+  readDirectory: targetPath => ipcRenderer.invoke('read-directory', targetPath),
+  readFile: targetPath => ipcRenderer.invoke('read-file', targetPath),
+  getPIAFPaths: () => getPIAFPaths()
 });
+
+contextBridge.exposeInMainWorld('PIAF_PATHS', getPIAFPaths());
