@@ -3324,29 +3324,55 @@ function normalisePolygon(polygon, width, height) {
   return coords;
 }
 
+let lastAlertTime = 0;
+
 function showToast(message, type = 'info') {
-  if (!toastContainer) return;
-  const toast = document.createElement('div');
-  toast.textContent = message;
-  toast.style.padding = '10px 16px';
-  toast.style.borderRadius = '4px';
-  toast.style.color = '#fff';
-  toast.style.fontSize = '14px';
-  toast.style.boxShadow = '0 2px 6px rgba(0,0,0,0.3)';
-  toast.style.backgroundColor = {
-    success: '#4caf50',
-    error: '#f44336',
-    warning: '#ff9800',
-    info: '#2196f3'
-  }[type] || '#2196f3';
-  toastContainer.appendChild(toast);
-  setTimeout(() => {
-    toast.style.opacity = '0';
-    toast.style.transition = 'opacity 0.3s';
-    setTimeout(() => {
-      toast.remove();
-    }, 300);
-  }, 4000);
+  showAlert(message, type);
+}
+
+function showAlert(message, type = 'info') {
+  const now = Date.now();
+  if (now - lastAlertTime < 500) {
+    return;
+  }
+  lastAlertTime = now;
+
+  const iconMap = {
+    success: 'success',
+    info: 'info',
+    warning: 'warning',
+    error: 'error'
+  };
+
+  const swalType = iconMap[type] || 'info';
+
+  if (typeof Swal === 'undefined' || !Swal || typeof Swal.fire !== 'function') {
+    console.warn('SweetAlert2 no está disponible. Mostrando alerta básica.', message);
+    if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+      window.alert(message);
+    }
+    return;
+  }
+
+  Swal.fire({
+    title: message,
+    icon: swalType,
+    confirmButtonText: 'OK',
+    confirmButtonColor: '#4CAF50',
+    background: '#1e1e1e',
+    color: '#f1f1f1',
+    customClass: {
+      popup: 'swal-popup',
+      title: 'swal-title',
+      confirmButton: 'swal-button'
+    },
+    timer: swalType === 'success' || swalType === 'info' ? 1800 : undefined,
+    timerProgressBar: true,
+    toast: false,
+    position: 'center'
+  }).catch(error => {
+    console.error('Error al mostrar alerta SweetAlert2:', error);
+  });
 }
 
 function showBanner(message) {

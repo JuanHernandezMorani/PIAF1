@@ -207,3 +207,18 @@ header h1 {
     font-size: 0.8rem;
     opacity: 0.8;
 }
+
+.swal-popup {
+    border-radius: 12px !important;
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.4);
+}
+
+.swal-title {
+    font-size: 18px !important;
+    font-weight: 500;
+}
+
+.swal-button {
+    border-radius: 8px !important;
+    padding: 6px 16px !important;
+}
