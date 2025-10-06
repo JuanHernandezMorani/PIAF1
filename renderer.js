@@ -34,6 +34,8 @@ const NON_ORIENTATION_CLASSES = [
   'fangs'
 ];
 
+const EYE_CLASS_ALIASES = new Set(['eyes', 'ojos', 'eye', 'ojo']);
+
 function classSupportsOrientation(className) {
   return ORIENTATION_CLASS_SET.has(className);
 }
@@ -2764,12 +2766,11 @@ function validatePolygon(annotation, object) {
     : (annotation && typeof annotation.class_name === 'string'
         ? annotation.class_name
         : (typeof state.currentClassName === 'string' ? state.currentClassName : null));
-  const minArea = className === 'ojos' ? MIN_EYE_POLYGON_AREA : MIN_POLYGON_AREA;
+  const isEyes = EYE_CLASS_ALIASES.has((className || '').toLowerCase());
   const area = Math.abs(polygonArea(polygon));
-  if (area < minArea) {
-    if (className !== 'ojos') {
-      errors.push('El área del polígono es demasiado pequeña.');
-    }
+  const minArea = isEyes ? MIN_EYE_POLYGON_AREA : MIN_POLYGON_AREA;
+  if ((area < minArea) && !isEyes) {
+    errors.push('El área del polígono es demasiado pequeña.');
   }
   if (hasSelfIntersection(polygon)) {
     warnings.push('El polígono tiene auto-intersecciones.');
