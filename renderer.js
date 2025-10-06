@@ -7,6 +7,10 @@ const SAVE_DEBOUNCE_MS = 500;
 const PIAF_MODE = (typeof window !== 'undefined' && window.PIAF_MODE) ? window.PIAF_MODE : 'minecraft';
 const TEXTURE_MODE = PIAF_MODE === 'texture';
 const PATH_INFO = (typeof window !== 'undefined' && window.PIAF_PATHS) ? window.PIAF_PATHS : null;
+
+if (typeof window !== 'undefined') {
+  console.log('[DEBUG] PIAF_PATHS inicializadas:', window.PIAF_PATHS);
+}
 const FALLBACK_DIRS = {
   unboxed: 'toDrawMinecraft',
   normal: 'toDrawNormal',

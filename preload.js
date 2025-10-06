@@ -1,34 +1,36 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const os = require('os');
 const path = require('path');
 
-const baseDocs = path.join(os.homedir(), 'Documents', 'DataTextureGUI');
-const exposedDirs = {
-  base: baseDocs,
-  unboxed: path.join(baseDocs, 'unboxedTextures'),
-  normal: path.join(baseDocs, 'normalTextures'),
-  labels: path.join(baseDocs, 'labels'),
-  train: path.join(baseDocs, 'trainingData'),
-  config: path.join(baseDocs, 'config')
-};
+async function buildPaths() {
+  const docsPath = await ipcRenderer.invoke('get-documents-path');
+  const baseDocs = path.join(docsPath, 'DataTextureGUI');
+  const dirs = {
+    base: baseDocs,
+    unboxed: path.join(baseDocs, 'unboxedTextures'),
+    normal: path.join(baseDocs, 'normalTextures'),
+    labels: path.join(baseDocs, 'labels'),
+    train: path.join(baseDocs, 'trainingData'),
+    config: path.join(baseDocs, 'config')
+  };
 
-const modeFiles = {
-  minecraft: {
-    jsonl: path.join(exposedDirs.train, 'trainDataMinecraft.jsonl'),
-    fullJsonl: path.join(exposedDirs.train, 'trainDataMinecraft.full.jsonl'),
-    yaml: path.join(exposedDirs.train, 'datasetMinecraft.yaml')
-  },
-  texture: {
-    jsonl: path.join(exposedDirs.train, 'trainDataNormal.jsonl'),
-    fullJsonl: path.join(exposedDirs.train, 'trainDataNormal.full.jsonl'),
-    yaml: path.join(exposedDirs.train, 'datasetNormal.yaml')
-  }
-};
+  const modeFiles = {
+    minecraft: {
+      jsonl: path.join(dirs.train, 'trainDataMinecraft.jsonl'),
+      fullJsonl: path.join(dirs.train, 'trainDataMinecraft.full.jsonl'),
+      yaml: path.join(dirs.train, 'datasetMinecraft.yaml')
+    },
+    texture: {
+      jsonl: path.join(dirs.train, 'trainDataNormal.jsonl'),
+      fullJsonl: path.join(dirs.train, 'trainDataNormal.full.jsonl'),
+      yaml: path.join(dirs.train, 'datasetNormal.yaml')
+    }
+  };
 
-contextBridge.exposeInMainWorld('PIAF_PATHS', {
-  baseDocs,
-  dirs: exposedDirs,
-  modeFiles
+  contextBridge.exposeInMainWorld('PIAF_PATHS', { dirs, modeFiles });
+}
+
+buildPaths().catch(err => {
+  console.error('Failed to expose PIAF_PATHS:', err);
 });
 
 contextBridge.exposeInMainWorld('electronAPI', {
