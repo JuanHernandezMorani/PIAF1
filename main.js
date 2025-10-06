@@ -14,6 +14,21 @@ const ORIENTATIONS = [
 ];
 const ORIENTATION_COUNT = ORIENTATIONS.length;
 const ORIENT_DEFAULT_ID = 0;
+const NON_ORIENTATION_CLASSES = [
+  'eyes',
+  'mouth',
+  'heart',
+  'cracks',
+  'cristal',
+  'flower',
+  'zombie_zone',
+  'sky',
+  'stars',
+  'wings',
+  'claws',
+  'aletas',
+  'fangs'
+];
 
 let mainWindow;
 
@@ -498,9 +513,16 @@ ipcMain.handle('export-dataset', async (event, payload) => {
     const splits = payload.splits || { train: 0.7, val: 0.2, test: 0.1 };
     const classNames = sanitiseClasses(payload.classes || []);
     const expandOrientations = Boolean(payload.expandOrientations);
-    const classDisplayNames = expandOrientations
-      ? classNames.flatMap(className => ORIENTATIONS.map(orientation => `${className}:${orientation.key}`))
-      : classNames.slice();
+    const classDisplayNames = [];
+    classNames.forEach(className => {
+      if (expandOrientations && !NON_ORIENTATION_CLASSES.includes(className)) {
+        ORIENTATIONS.forEach(orientation => {
+          classDisplayNames.push(`${className}:${orientation.key}`);
+        });
+      } else {
+        classDisplayNames.push(className);
+      }
+    });
     const fileNames = payload.images.map(item => item.fileName);
     const shuffled = shuffle(fileNames);
 
