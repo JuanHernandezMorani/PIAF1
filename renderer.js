@@ -2901,22 +2901,40 @@ function polygonArea(polygon) {
 
 function hasSelfIntersection(polygon) {
   const n = polygon.length;
-  for (let i = 0; i < n; i += 1) {
+  if (n < 4) return false;
+
+  for (let i = 0; i < n; i++) {
     const a1 = polygon[i];
     const a2 = polygon[(i + 1) % n];
-    for (let j = i + 1; j < n; j += 1) {
-      if (Math.abs(i - j) <= 1 || (i === 0 && j === n - 1)) {
-        continue;
-      }
+
+    for (let j = i + 1; j < n; j++) {
+      // saltar segmentos consecutivos o que comparten extremos
+      if (Math.abs(i - j) <= 1 || (i === 0 && j === n - 1)) continue;
+
       const b1 = polygon[j];
       const b2 = polygon[(j + 1) % n];
+
       if (segmentsIntersect(a1, a2, b1, b2)) {
+        // si solo se tocan en los extremos → no cuenta
+        if (pointsTouchOnlyAtEnds(a1, a2, b1, b2)) continue;
         return true;
       }
     }
   }
   return false;
 }
+
+function pointsTouchOnlyAtEnds(a1, a2, b1, b2) {
+  return (
+    (equalPoints(a1, b1) || equalPoints(a1, b2) ||
+     equalPoints(a2, b1) || equalPoints(a2, b2))
+  );
+}
+
+function equalPoints(p1, p2, eps = 1e-6) {
+  return Math.abs(p1.x - p2.x) < eps && Math.abs(p1.y - p2.y) < eps;
+}
+
 
 function segmentsIntersect(p1, p2, p3, p4) {
   const d1 = direction(p3, p4, p1);
