@@ -6,6 +6,22 @@ const SAVE_DEBOUNCE_MS = 500;
 
 const PIAF_MODE = (typeof window !== 'undefined' && window.PIAF_MODE) ? window.PIAF_MODE : 'minecraft';
 const TEXTURE_MODE = PIAF_MODE === 'texture';
+const PATH_INFO = (typeof window !== 'undefined' && window.PIAF_PATHS) ? window.PIAF_PATHS : null;
+const FALLBACK_DIRS = {
+  unboxed: 'toDrawMinecraft',
+  normal: 'toDrawNormal',
+  labels: 'labels',
+  train: ''
+};
+const DIRECTORIES = PATH_INFO ? PATH_INFO.dirs : FALLBACK_DIRS;
+const drawFolder = TEXTURE_MODE ? DIRECTORIES.normal : DIRECTORIES.unboxed;
+const modeFiles = PATH_INFO ? PATH_INFO.modeFiles : null;
+const jsonlPath = modeFiles ? (TEXTURE_MODE ? modeFiles.texture.jsonl : modeFiles.minecraft.jsonl) : '';
+const yamlPath = modeFiles ? (TEXTURE_MODE ? modeFiles.texture.yaml : modeFiles.minecraft.yaml) : '';
+const fullJsonlPath = modeFiles ? (TEXTURE_MODE ? modeFiles.texture.fullJsonl : modeFiles.minecraft.fullJsonl) : '';
+const jsonlName = jsonlPath ? jsonlPath.split(/[\\/]/).pop() : 'trainData.jsonl';
+const fullJsonlName = fullJsonlPath ? fullJsonlPath.split(/[\\/]/).pop() : 'trainData.full.jsonl';
+const yamlName = yamlPath ? yamlPath.split(/[\\/]/).pop() : 'dataset.yaml';
 
 const ORIENTATIONS = TEXTURE_MODE ? [] : [
   { id: 0, key: 'arriba', label: 'Top' },
@@ -779,6 +795,9 @@ let suppressGlobalMinecraftStyleChange = false;
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
+  if (noImages) {
+    noImages.textContent = `No hay imágenes en la carpeta "${drawFolder}"`;
+  }
   loadSessionPreferences();
   setupAuxiliaryContainers();
   setupConfigPanel();
@@ -1198,7 +1217,7 @@ async function ensureAletasClass() {
 async function loadExistingData() {
   const result = await window.electronAPI.loadExistingData();
   if (!result.success) {
-    showToast(`No se pudo cargar trainData.jsonl: ${result.error}`, 'error');
+    showToast(`No se pudo cargar ${jsonlName}: ${result.error}`, 'error');
     return;
   }
   const migrationStats = { migrated: 0 };
@@ -1218,7 +1237,7 @@ async function loadExistingData() {
     result.errors.forEach(error => {
       state.loadErrors.push(error);
     });
-    showToast(`Se omitieron ${result.errors.length} líneas corruptas en trainData.jsonl`, 'warning');
+    showToast(`Se omitieron ${result.errors.length} líneas corruptas en ${jsonlName}`, 'warning');
   }
 }
 

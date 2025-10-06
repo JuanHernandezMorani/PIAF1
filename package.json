@@ -8,10 +8,12 @@
     "build": "electron-builder"
   },
   "devDependencies": {
-    "electron": "^22.0.0"
+    "electron": "^22.0.0",
+    "electron-builder": "^26.0.12"
   },
   "dependencies": {
     "fs": "0.0.1-security",
-    "path": "^0.12.7"
+    "path": "^0.12.7",
+    "sweetalert2": "^11.24.0"
   }
 }
