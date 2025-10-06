@@ -48,3 +48,7 @@ dist
 .dynamodb/
 .tern-port
 package-lock.json
+toDrawMinecraft/*
+toDrawNormal/*
+!toDrawMinecraft/.gitkeep
+!toDrawNormal/.gitkeep
