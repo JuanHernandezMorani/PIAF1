@@ -1,4 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
+let path, os;
+try {
+  path = require('path');
+  os = require('os');
+} catch { /* sandbox fallback */ }
 
 const getPIAFPaths = () => {
   for (const arg of process.argv) {
@@ -16,7 +21,7 @@ const getPIAFPaths = () => {
     dirs: { base: '', unboxed: '', normal: '', labels: '', train: '', config: '' },
     modeFiles: { textureMode: '', classes: '', orientations: '' },
     datasets: { minecraft: {}, texture: {} },
-    baseDocs: require('path').join(require('os').homedir(), 'Documents', 'DataTextureGUI')
+    baseDocs: path.join(os.homedir(), 'Documents', 'DataTextureGUI') | null
   };
   console.warn('[DEBUG PRELOAD] Usando fallback paths');
   return fallbackPaths;
